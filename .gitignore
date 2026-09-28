@@ -1,0 +1,18 @@
+# Never commit secrets or live state. This repo is a copy of hand-authored files only.
+.env
+.env.*
+!.env.example
+auth.json
+nous_auth.json
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.bak-*
+*.lock
+*.pid
+*.log
+*.jsonl
+__pycache__/
+*.pyc
+.pytest_cache/

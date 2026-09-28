@@ -1,0 +1,14 @@
+{
+  "remote": "file:///home/YOUR_LINUX_USER/bdrive-store",
+  "addr": ":4173",
+  "upload": true,
+  "volume": "BearDrive",
+  "auth": {
+    "allow_signup": false,
+    "require_verification": false,
+    "require_approval": false,
+    "admins": ["you@example.com"],
+    "brand": "BearDrive (local)"
+  },
+  "reads": { "enabled": true }
+}

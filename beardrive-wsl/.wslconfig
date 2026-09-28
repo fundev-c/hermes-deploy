@@ -1,0 +1,7 @@
+[general]
+# Keep Ubuntu-24.04 running with no terminal attached, so the BearDrive hub
+# (systemd user unit bdrive-hub.service) is not stopped when WSL goes idle.
+instanceIdleTimeout=-1
+
+[wsl2]
+vmIdleTimeout=-1

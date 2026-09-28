@@ -1,0 +1,4 @@
+# Store every file byte-for-byte. The Hermes tree mixes LF and CRLF on purpose
+# (config.yaml, .env and PRD.md are CRLF; the plugin is LF), and an EOL
+# conversion would rewrite every line. See docs/BearDrive-PRD.md gotcha 21.
+* -text

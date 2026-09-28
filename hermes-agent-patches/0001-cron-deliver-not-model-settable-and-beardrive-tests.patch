@@ -1,0 +1,277 @@
+diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
+index d9073638b5..5fd400598f 100644
+--- a/tools/cronjob_tools.py
++++ b/tools/cronjob_tools.py
+@@ -1039,14 +1039,17 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
+                 "type": "integer",
+                 "description": "Optional repeat count. Omit for defaults (once for one-shot, forever for recurring)."
+             },
+-            "deliver": {
+-                "type": "string",
+-                "description": "Where the job's output is POSTED as a one-way message (the job itself always runs in a fresh session with no chat context). Omit to address the chat/topic this job was created from. Otherwise: 'local' (save only, no delivery), 'all' (every connected home channel, resolved at fire time), 'bot-chat' or 'bot-chat:<profile>' (inject into a Bot Chat as a real message), or platform:chat_id:thread_id (e.g. 'telegram:-1001234567890:17585'). Comma-combine like 'origin,all'."
+-            },
+-            "failure_deliver": {
+-                "type": "string",
+-                "description": "Optional override target for FAILURE notices only (same grammar as deliver). When set, engine failure/interruption notices go here instead of the deliver target; 'local' suppresses them entirely (state still recorded in cron list/run history). Use for jobs delivering into shared channels where failure noise is unwanted. Omit = failures follow deliver (default). On update, '' clears."
+-            },
++            # deliver / failure_deliver are deliberately NOT exposed to the model.
++            # Cron delivery uses the platform adapter, which does not pass through the
++            # n8n send_email recipient allowlist -- so a model-settable deliver was a
++            # second, unguarded egress path (observed live: job c8e296de2edf, where the
++            # n8n guard refused three send_email attempts and the adapter delivered the
++            # same content anyway). `origin` covers every real case, resolves to the
++            # requester, and is unforgeable precisely because it is absent from this
++            # schema. A cron session also binds chat_id="" on purpose, so the model has
++            # no way to know a correct address and will guess if asked to. Omitting
++            # deliver already defaults to origin-or-local -- see _local_delivery_notice
++            # in cronjob_job_args.py. CLI callers still pass both into cronjob() directly.
+             "skills": {
+                 "type": "array",
+                 "items": {"type": "string"},
+@@ -1085,7 +1088,7 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
+             },
+             "attach_to_session": {
+                 "type": "boolean",
+-                "description": "True = the job's delivery is CONTINUABLE — the user can reply and the agent has the brief in context (threads on thread-capable platforms, mirrored into the DM elsewhere). Use for conversational recurring jobs (briefings); leave unset for fire-and-forget alerts. Scope: the job's own conversation only — the origin chat, the home-channel fallback when deliver='origin' captured no origin (script-created jobs), a user-written bare platform target (deliver='slack' — that platform's home channel), or the job's single explicit platform:chat target (this flag is the only way to attach an explicit target). Broadcast targets are never attached; no effect when deliver='local'."
++                "description": "True = the job's delivery is CONTINUABLE — the user can reply and the agent has the brief in context (threads on thread-capable platforms, mirrored into the DM elsewhere). Use for conversational recurring jobs (briefings); leave unset for fire-and-forget alerts. Scope: the job's own conversation only — normally the origin chat, or the home-channel fallback when no origin was captured (script-created jobs). Jobs created outside the agent (CLI/scripts) may also carry a bare platform target or a single explicit platform:chat target, and this flag is the only way to attach one. Broadcast targets are never attached, and it has no effect on a job that only saves its output."
+             },
+         },
+         "required": ["action"]
+@@ -1113,7 +1116,9 @@ def check_cronjob_requirements() -> bool:
+ # create/edit --model`, hand-edited jobs) — the agent must not point unattended spend at a
+ # different model. Programmatic callers of cronjob() itself retain the parameters.
+ _HANDLER_FORWARDED_ARGS = (
+-    "job_id", "prompt", "schedule", "name", "repeat", "deliver", "failure_deliver", "skill", "skills", "reason",
++    # "deliver"/"failure_deliver" intentionally absent -- see CRONJOB_SCHEMA. args.get()
++    # would otherwise forward a key the model invented even after the schema dropped it.
++    "job_id", "prompt", "schedule", "name", "repeat", "skill", "skills", "reason",
+     "script", "context_from", "continuity", "enabled_toolsets", "workdir", "no_agent", "attach_to_session",
+     "paused_reason", "all")
+ 
+diff --git a/tests/cron/test_cron_deliver_not_model_settable.py b/tests/cron/test_cron_deliver_not_model_settable.py
+new file mode 100644
+index 0000000000..0101302df5
+--- /dev/null
++++ b/tests/cron/test_cron_deliver_not_model_settable.py
+@@ -0,0 +1,111 @@
++"""``deliver``/``failure_deliver`` must not be reachable by the model.
++
++Cron delivery goes through the platform adapter, which does **not** pass through the
++n8n ``send_email`` recipient allowlist. While ``deliver`` was model-settable there were
++two egress paths out of a cron run and only one of them was guarded.
++
++Observed live on 2026-09-22 (job ``c8e296de2edf``): the n8n guard refused all three
++``send_email`` attempts the agent made, and the scheduler then delivered the same
++content anyway via ``deliver: origin`` -- ``delivered to email:... via live adapter``.
++
++``origin`` replaces it completely: it resolves to the requester, and it is unforgeable
++precisely because it is absent from the model-visible schema. Omitting ``deliver``
++already defaults to origin-or-local, so nothing had to be added to remove it.
++"""
++
++import json
++
++import pytest
++
++from tools.cronjob_tools import (
++    CRONJOB_SCHEMA,
++    _HANDLER_FORWARDED_ARGS,
++    _cronjob_handler,
++    _cronjob_schema_overrides,
++    cronjob,
++)
++
++EGRESS_FIELDS = ("deliver", "failure_deliver")
++
++
++class TestDeliverIsNotModelVisible:
++    @pytest.mark.parametrize("field", EGRESS_FIELDS)
++    def test_absent_from_static_schema(self, field):
++        assert field not in CRONJOB_SCHEMA["parameters"]["properties"]
++
++    @pytest.mark.parametrize("field", EGRESS_FIELDS)
++    def test_absent_from_dynamic_schema(self, field):
++        """The schema is rebuilt per get_definitions() for the active profile; the
++        removal has to survive that copy, not just the module-level literal."""
++        props = _cronjob_schema_overrides()["parameters"]["properties"]
++        assert field not in props
++
++    @pytest.mark.parametrize("field", EGRESS_FIELDS)
++    def test_not_forwarded_by_handler(self, field, monkeypatch):
++        """Defence in depth: the handler forwards via ``args.get(key)``, so leaving the
++        name in _HANDLER_FORWARDED_ARGS would still pass through a key the model
++        invented even after the schema stopped advertising it."""
++        assert field not in _HANDLER_FORWARDED_ARGS
++
++        seen = {}
++
++        def _fake_cronjob(**kwargs):
++            seen.update(kwargs)
++            return json.dumps({"success": True})
++
++        monkeypatch.setattr("tools.cronjob_tools.cronjob", _fake_cronjob)
++        _cronjob_handler(
++            {
++                "action": "create",
++                "prompt": "x",
++                "schedule": "every 2m",
++                field: "email:attacker@evil.example",
++            }
++        )
++        assert field not in seen
++
++
++class TestOriginStillDelivers:
++    """Removing the field must not remove delivery -- origin covers every real case."""
++
++    @pytest.fixture(autouse=True)
++    def _setup_cron_dir(self, tmp_path, monkeypatch):
++        monkeypatch.setattr("cron.jobs.CRON_DIR", tmp_path / "cron")
++        monkeypatch.setattr("cron.jobs.JOBS_FILE", tmp_path / "cron" / "jobs.json")
++        monkeypatch.setattr("cron.jobs.OUTPUT_DIR", tmp_path / "cron" / "output")
++        for var in (
++            "HERMES_SESSION_PLATFORM",
++            "HERMES_SESSION_CHAT_ID",
++            "HERMES_SESSION_THREAD_ID",
++            "HERMES_SESSION_CHAT_NAME",
++        ):
++            monkeypatch.delenv(var, raising=False)
++        from gateway.session_context import clear_session_vars, set_session_vars
++
++        tokens = set_session_vars()
++        yield
++        clear_session_vars(tokens)
++
++    def test_email_session_still_resolves_to_origin(self):
++        """The §4.0 shape: a job created from an email session, with no deliver
++        argument available to the model at all, still routes back to the requester."""
++        from gateway.session_context import set_session_vars
++
++        set_session_vars(platform="email", chat_id="harshilkhandelwal71@gmail.com")
++        created = json.loads(
++            cronjob(action="create", prompt="Report the Q3 total", schedule="in 3m")
++        )
++        assert created["success"] is True
++        assert created["deliver"] == "origin"
++
++        # The STORED record carries the origin the scheduler will deliver to.
++        from cron.jobs import get_job
++
++        stored = get_job(created["job_id"])
++        assert stored["origin"]["platform"] == "email"
++        assert stored["origin"]["chat_id"] == "harshilkhandelwal71@gmail.com"
++
++        # ...and the formatted job handed back to the model does NOT, which is the
++        # whole reason origin is trustworthy as the sole delivery target: there is no
++        # model-visible field naming a recipient any more.
++        assert "origin" not in created["job"]
+diff --git a/tests/security/test_beardrive_cross_tool_containment.py b/tests/security/test_beardrive_cross_tool_containment.py
+new file mode 100644
+index 0000000000..6fcd2a75c4
+--- /dev/null
++++ b/tests/security/test_beardrive_cross_tool_containment.py
+@@ -0,0 +1,104 @@
++"""The email/cron agent reaches the filesystem only through the BearDrive jail.
++
++Deployment guard for this Hermes home (Bear_Drive/PRD.md 4.4 item 1). It resolves
++the catalog from the deployed ``config.yaml`` and ``plugins/beardrive`` -- copied
++into the hermetic HERMES_HOME, never read or written in place -- because the
++perimeter is configuration, and a unit test over a synthetic config would pass
++while the real one leaked.
++
++Three contracts:
++
++1. ``email`` and ``cron`` carry the ``drive_*`` tools and none of the generic
++   filesystem/exec tools that would bypass the jail (parent PRD 3.9).
++2. The ``beardrive`` toolset resolves on no other platform. Plugin toolsets are
++   on by default for any platform that does not list them as known
++   (``tools_config._enabled_plugin_toolsets``), so the allowlist alone never
++   contained them -- Bear_Drive/PRD.md gotcha 4.
++3. Both 3.9 measurement traps are encoded, not commented: the catalog is read
++   with ``HERMES_GATEWAY_SESSION=1`` and ``skip_tool_search_assembly=True``;
++   without them the probe measures a different catalog than the gateway serves.
++"""
++
++import shutil
++from pathlib import Path
++
++import pytest
++
++DEPLOYED_HOME = Path(__file__).resolve().parents[3]
++JAILED_PLATFORMS = ("email", "cron")
++DRIVE_TOOLS = {"drive_list", "drive_read", "drive_search", "drive_save_attachment", "drive_status"}
++BYPASS_TOOLS = {"read_file", "search_files", "write_file", "patch", "terminal",
++                "execute_code", "delegate_task", "computer_use"}
++
++pytestmark = pytest.mark.skipif(
++    not ((DEPLOYED_HOME / "config.yaml").is_file() and (DEPLOYED_HOME / "plugins" / "beardrive").is_dir()),
++    reason="not running inside a deployed Hermes home with the beardrive plugin",
++)
++
++
++@pytest.fixture
++def deployed_config(tmp_path, monkeypatch):
++    """The deployed config and plugin, in the hermetic home, with a real mount to gate on."""
++    import os
++    home = Path(os.environ["HERMES_HOME"])
++    shutil.copy2(DEPLOYED_HOME / "config.yaml", home / "config.yaml")
++    shutil.copytree(DEPLOYED_HOME / "plugins" / "beardrive", home / "plugins" / "beardrive",
++                    ignore=shutil.ignore_patterns("__pycache__", "test_*.py"))
++    mount = tmp_path / "BearDrive"
++    (mount / ".bdrive").mkdir(parents=True)
++    monkeypatch.setenv("BEARDRIVE_ROOT", str(mount))
++    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
++
++    from hermes_cli.config import load_config
++    return load_config()
++
++
++def _catalog(config, platform):
++    from hermes_cli.tools_config import _get_platform_tools
++    from model_tools import get_tool_definitions
++    toolsets = sorted(_get_platform_tools(config, platform, include_default_mcp_servers=False))
++    defs = get_tool_definitions(enabled_toolsets=toolsets, quiet_mode=True, skip_tool_search_assembly=True)
++    return {d["function"]["name"] if "function" in d else d["name"] for d in defs}
++
++
++@pytest.mark.parametrize("platform", JAILED_PLATFORMS)
++def test_jailed_platform_gets_the_drive_and_nothing_that_bypasses_it(deployed_config, platform):
++    names = _catalog(deployed_config, platform)
++    assert DRIVE_TOOLS <= names, f"{platform} is missing {sorted(DRIVE_TOOLS - names)}"
++    assert not (BYPASS_TOOLS & names), f"{platform} exposes {sorted(BYPASS_TOOLS & names)}"
++
++
++def test_learned_skills_are_staged_and_no_emailer_can_approve_them(deployed_config):
++    """Learning (skill_manage on email/cron) is persistent cross-member influence: one email can
++    shape every later run. So a skill write must be staged, and approval must be out of reach of
++    anyone who can email the agent -- including turning the gate off with /skills approval off.
++    With no slash admin list, every allowed sender may run every slash command (slash_access.py)."""
++    if not any("skill_manage" in _catalog(deployed_config, p) for p in JAILED_PLATFORMS):
++        return  # learning not enabled: nothing to gate
++    from types import SimpleNamespace
++
++    from gateway.config import load_gateway_config
++    from gateway.slash_access import policy_for_source
++    from tools import write_approval as wa
++
++    assert wa.write_approval_enabled(wa.SKILLS), "skill_manage is reachable from email/cron but unstaged"
++    gw = load_gateway_config()
++    email = next(k for k in gw.platforms if str(getattr(k, "value", k)) == "email")
++    for chat_type in ("dm", "group"):
++        policy = policy_for_source(gw, SimpleNamespace(platform=email, chat_type=chat_type, user_id="member@example.com"))
++        assert policy.enabled, f"email {chat_type}: slash gating is off, so any sender can /skills approve"
++        assert not policy.can_run("member@example.com", "skills")
++        assert all(a.endswith(".invalid") for a in policy.admin_user_ids), (
++            f"email {chat_type}: {sorted(policy.admin_user_ids)} can approve skills by email; "
++            "approval is meant to happen only at this PC")
++
++
++def test_beardrive_toolset_resolves_only_on_the_jailed_platforms(deployed_config):
++    from hermes_cli.tools_config import PLATFORMS, _get_platform_tools
++    leaking = sorted(
++        p for p in PLATFORMS
++        if p not in JAILED_PLATFORMS
++        and "beardrive" in _get_platform_tools(deployed_config, p, include_default_mcp_servers=False)
++    )
++    assert not leaking, f"beardrive is ambient on {leaking}; add it to known_plugin_toolsets for each"
++    assert set(JAILED_PLATFORMS) <= set(PLATFORMS)

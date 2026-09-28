@@ -1,0 +1,132 @@
+{
+  "id": "epSxrrH1HFv0gWvU",
+  "name": "My workflow",
+  "nodes": [
+    {
+      "id": "e124ca9b-aa66-4b5f-991f-e9856c69cf24",
+      "name": "MCP Server Trigger",
+      "webhookId": "0e22b1a4-677a-4133-88ed-7434975eff66",
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "authentication": "bearerAuth",
+        "path": "hermes"
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "nuU56a1AzvwwdGMV",
+          "name": "Bearer Auth account"
+        }
+      }
+    },
+    {
+      "id": "fad9dff4-1e64-4e2f-b0d0-66b3aada4a85",
+      "name": "hermes_ping",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.3,
+      "position": [
+        96,
+        208
+      ],
+      "parameters": {
+        "description": "Health check. Returns ok plus whatever string you pass in.",
+        "jsCode": "return `ok — received: ${query}`;"
+      }
+    },
+    {
+      "id": "b4444444-4444-4444-8444-444444444444",
+      "name": "send_email",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "description": "Send an email. Only pre-authorized recipients are permitted; anything else is rejected.",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "oSMbdlVsTQDdeskN",
+          "cachedResultName": "hermes__send_email"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "to": "={{ $fromAI('to', \"Recipient email address. Must be a pre-authorized address.\", 'string') }}",
+            "subject": "={{ $fromAI('subject', \"Email subject line\", 'string') }}",
+            "body": "={{ $fromAI('body', \"Plain-text body of the email\", 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "to",
+              "displayName": "to",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "body",
+              "displayName": "body",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      }
+    }
+  ],
+  "connections": {
+    "hermes_ping": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "send_email": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": true
+  }
+}

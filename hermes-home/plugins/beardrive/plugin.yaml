@@ -1,0 +1,28 @@
+name: beardrive
+label: BearDrive
+kind: standalone
+version: 1.0.0
+description: >
+  Jailed access to the team's shared folder, kept in sync by BearDrive.
+  One folder for every allow-listed sender: list, read, search, save an
+  emailed attachment (never overwriting), and report sync health.
+
+  Paths are jailed: no absolute paths, no '..', no symlinks, no UNC paths,
+  no NTFS alternate data streams, no reserved device names, and BearDrive's
+  own files are off limits. File contents are returned fenced as untrusted
+  data. Every call is recorded in logs/beardrive-access.jsonl.
+python_dependencies:
+  - "openpyxl>=3.1.5,<4"   # .xlsx/.xlsm reading (uses the venv's defusedxml for untrusted XML)
+  - "pypdf>=6.0,<7"        # PDF text extraction (floor kept low: Hermes' resolver has an exclude-newer cutoff)
+optional_env:
+  - name: BEARDRIVE_ROOT
+    description: "The BearDrive-synced shared folder (must already exist and contain .bdrive/)"
+    prompt: "BearDrive shared folder"
+    password: false
+config_schema:
+  heartbeat_path:
+    type: str
+    description: "The sync daemon's sync.json, as Windows sees it (rewritten every remote cycle)"
+  hub_url:
+    type: str
+    description: "BearDrive hub URL, probed for drive_status"

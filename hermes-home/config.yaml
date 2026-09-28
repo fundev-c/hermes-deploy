@@ -1,0 +1,329 @@
+model:
+  default: meituan/longcat-2.0:free
+  provider: nous
+  base_url: https://inference-api.nousresearch.com/v1
+fallback_providers:
+  - provider: openrouter
+    model: nvidia/nemotron-3-super-120b-a12b:free
+  - provider: openrouter
+    model: deepseek/deepseek-v4-flash-0731:free
+  - provider: openrouter
+    model: liquid/lfm-2.5-2.6b:free
+  - provider: custom
+    model: Qwen3-1.7B
+    base_url: http://127.0.0.1:8080/v1
+database:
+  journal_mode: wal
+runtime:
+  nofile_soft_limit: 4096
+agent:
+  max_turns: 150
+  verbose: false
+  reasoning_effort: medium
+  personalities: {}
+terminal:
+  backend: local
+  cwd: .
+  timeout: 180
+  home_mode: auto
+  container_cpu: 1
+  container_memory: 5120
+  container_disk: 51200
+  container_persistent: true
+  docker_mount_cwd_to_workspace: false
+  lifetime_seconds: 300
+browser:
+  backend: browser-use
+  inactivity_timeout: 120
+  extension_control:
+    enabled: false
+tool_loop_guardrails:
+  warnings_enabled: true
+  hard_stop_enabled: false
+  warn_after:
+    exact_failure: 2
+    same_tool_failure: 3
+    idempotent_no_progress: 2
+  hard_stop_after:
+    exact_failure: 5
+    same_tool_failure: 8
+    idempotent_no_progress: 5
+compression:
+  enabled: true
+  progress_notices: false
+  threshold: 0.5
+  target_ratio: 0.2
+  protect_last_n: 20
+  min_tail_user_messages: 1
+  max_attempts: 3
+  proactive_prune_tokens: 0
+  proactive_prune_min_result_chars: 8000
+  proactive_prune_min_reclaim_tokens: 4096
+  protect_first_n: 3
+  codex_gpt55_autoraise: true
+  codex_app_server_auto: native
+  codex_responses_native: false
+  codex_responses_compact_threshold: 200000
+  idle_compact_after_seconds: 0
+prompt_caching:
+  cache_ttl: 5m
+display:
+  compact: false
+  busy_input_mode: interrupt
+  bell_on_complete: false
+  show_reasoning: false
+  background_process_notifications: concise
+  streaming: true
+  skin: default
+  interim_assistant_messages: true
+  tool_progress: all
+  cleanup_progress: false
+  long_running_notifications: true
+  busy_ack_detail: true
+stt:
+  enabled: true
+  language: en
+  local:
+    model: base
+  openai:
+    model: whisper-1
+    language: ''
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200
+  user_char_limit: 1375
+  nudge_interval: 10
+delegation:
+  max_iterations: 250
+skills:
+  creation_nudge_interval: 15
+  # 2026-09-24 (Bear_Drive\PRD.md 4.6): email/cron may learn skills, but every skill_manage
+  # write is STAGED until a human approves it at this PC (`hermes` -> /skills pending,
+  # /skills diff <id>, /skills approve|reject <id>). Emailers cannot approve: see
+  # platforms.email.allow_admin_from.
+  write_approval: true
+  # The email/cron agent has no terminal, so the scan here is not redundant (the default-off
+  # rationale is that terminal() runs the same code ungated).
+  guard_agent_created: true
+  # Hide every skill that existed before learning was switched on from email/cron, so those
+  # sessions see only skills learned from team tasks (hermes-agent is essential and exempt).
+  # A future `hermes update` that adds bundled skills will NOT be hidden automatically.
+  platform_disabled:
+    email: &pre_learning_skills [airtable, apple-notes, apple-reminders, 
+          architecture-diagram, arxiv, ascii-art, ascii-video, baoyu-infographic,
+      blocked-page-recovery, blogwatcher, box, claude-code, claude-design, 
+          codebase-inspection, codex, comfyui, competitor-news-monitor, 
+          computer-use, design-md, document-to-action-items, docx, dogfood, 
+          email-inbox-triage, evaluating-llms-harness, excalidraw, findmy, 
+          gif-search, github, github-auth, github-code-review, 
+          github-issue-to-pr, github-issues, github-pr-workflow, 
+          github-repo-management, google-workspace, grounded-citations, 
+          hermes-agent, hermes-agent-skill-authoring, himalaya, huggingface-hub, 
+          humanizer, imessage, inspecting-hermes-desktop-dom, llama-cpp, 
+          llm-wiki, manim-video, maps, meeting-action-items, merge-reconciler, 
+          nano-pdf, node-inspect-debugger, notion, obsidian, ocr-and-documents, 
+          opencode, openhue, p5js, pdf, plan, popular-web-designs, powerpoint, 
+          pretext, product-price-monitor, python-debugpy, requesting-code-review,
+      research-paper-writing, sdlc-review, serving-llms-vllm, session-librarian, 
+          simplify-code, sketch, songsee, songwriting-and-ai-music, spike, 
+          systematic-debugging, teams-meeting-pipeline, test-driven-development, 
+          touchdesigner-mcp, weekly-review-planning, weights-and-biases, xlsx, 
+          xurl, youtube-content]
+    cron: *pre_learning_skills
+plugins:
+  enabled:
+    - beardrive
+  disabled: []
+  entries:
+    beardrive:
+      allow_tool_override: false
+      settings:
+        heartbeat_path: 
+          \\wsl$\Ubuntu-24.04\home\dlteam_linux\.bdrive\volumes\m-0b9866e5\sync.json
+        hub_url: http://localhost:4173
+kanban:
+  review_dispatch: true
+code_execution:
+  timeout: 300
+  max_tool_calls: 50
+streaming:
+  enabled: false
+telemetry:
+  shared_metrics:
+    enabled: false
+updates:
+  pre_update_backup: false
+  backup_keep: 5
+  non_interactive_local_changes: stash
+_config_version: 45
+session_reset:
+  mode: none
+  idle_minutes: 1440
+  at_hour: 4
+group_sessions_per_user: true
+platform_toolsets:
+  # Locked down 2026-09-21: the email/cron agent gets the shared drive + scheduling only.
+  # Generic filesystem and exec toolsets (file, terminal, code_execution,
+  # computer_use, browser, delegation, connections) are withheld because they
+  # bypass the drive's jail -- verified reachable on cron job 4492149edad0.
+  # MCP servers (n8n-tools) are layered on separately and survive this allowlist.
+  # 2026-09-24: bear -> beardrive (Bear_Drive\PRD.md 4.3).
+  # 2026-09-24: + skills, for learning from team tasks -- writes are gated by
+  # skills.write_approval (PRD 4.6). skills is not a filesystem/exec toolset.
+  email:
+    - beardrive
+    - cronjob
+    - skills
+  cron:
+    - beardrive
+    - cronjob
+    - skills
+  cli:
+    - browser
+    - clarify
+    - code_execution
+    - computer_use
+    - connections
+    - cronjob
+    - delegation
+    - file
+    - image_gen
+    - memory
+    - session_search
+    - skills
+    - terminal
+    - todo
+    - tts
+    - vision
+    - web
+  telegram:
+    - hermes-telegram
+  discord:
+    - hermes-discord
+  whatsapp:
+    - hermes-whatsapp
+  slack:
+    - hermes-slack
+  signal:
+    - hermes-signal
+  homeassistant:
+    - hermes-homeassistant
+  qqbot:
+    - hermes-qqbot
+  yuanbao:
+    - hermes-yuanbao
+  teams:
+    - hermes-teams
+  google_chat:
+    - hermes-google_chat
+known_plugin_toolsets:
+  # Listing a plugin toolset as "known" for a platform while leaving it out of
+  # that platform's platform_toolsets list is what turns it OFF there -- without
+  # this, plugin toolsets are ambient on every platform (Bear_Drive\PRD.md gotcha 4).
+  cli:
+    - a2a
+    - beardrive
+    - spotify
+  telegram:
+    - beardrive
+  discord:
+    - beardrive
+  whatsapp:
+    - beardrive
+  slack:
+    - beardrive
+  signal:
+    - beardrive
+  homeassistant:
+    - beardrive
+  qqbot:
+    - beardrive
+  yuanbao:
+    - beardrive
+  teams:
+    - beardrive
+  google_chat:
+    - beardrive
+  # 2026-09-24: the platforms PRD 4.3 did not list -- found still ambient by a
+  # probe over every entry in PLATFORMS. None is enabled today.
+  api_server:
+    - beardrive
+  bluebubbles:
+    - beardrive
+  dingtalk:
+    - beardrive
+  feishu:
+    - beardrive
+  matrix:
+    - beardrive
+  mattermost:
+    - beardrive
+  webhook:
+    - beardrive
+  wecom:
+    - beardrive
+  wecom_callback:
+    - beardrive
+  weixin:
+    - beardrive
+  whatsapp_cloud:
+    - beardrive
+known_builtin_toolsets:
+  cli:
+    - browser
+    - clarify
+    - code_execution
+    - computer_use
+    - connections
+    - context_engine
+    - cronjob
+    - delegation
+    - discord
+    - discord_admin
+    - file
+    - homeassistant
+    - image_gen
+    - kanban
+    - memory
+    - session_search
+    - skills
+    - spotify
+    - stt
+    - terminal
+    - todo
+    - tts
+    - video
+    - video_gen
+    - vision
+    - web
+    - x_search
+    - yuanbao
+platforms:
+  email:
+    enabled: true
+    # Slash-command gating (gateway/slash_access.py). With no admin list, EVERY allowed sender
+    # may run every slash command -- including /skills approve and /skills approval off once
+    # skills.write_approval is on. A reserved .invalid address enables gating with no email
+    # admin at all: skill approval happens only at this PC. Non-admins keep /help and /whoami.
+    allow_admin_from: [no-email-admins@admin.invalid]
+    group_allow_admin_from: [no-email-admins@admin.invalid]
+    # 2026-09-25: members may start a fresh conversation (/new, alias /reset). Email sessions
+    # never end on their own and keep the tool list + skill index they started with, so /new is
+    # how a member picks up newly approved skills -- and how a pre-lockdown session is retired.
+    user_allowed_commands: [new]
+mcp_servers:
+  n8n-tools:
+    enabled: true
+    url: http://127.0.0.1:5678/mcp/hermes
+    headers:
+      Authorization: Bearer ${N8N_MCP_TOKEN}
+    trust: full
+    timeout: 120
+    connect_timeout: 60
+    keepalive_interval: 60
+onboarding:
+  seen:
+    busy_input_prompt: true
+approvals:
+  destructive_slash_confirm: false

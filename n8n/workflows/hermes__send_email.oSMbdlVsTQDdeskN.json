@@ -1,0 +1,102 @@
+{
+  "id": "oSMbdlVsTQDdeskN",
+  "name": "hermes__send_email",
+  "nodes": [
+    {
+      "id": "a1111111-1111-4111-8111-111111111111",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "to",
+              "type": "string"
+            },
+            {
+              "name": "subject",
+              "type": "string"
+            },
+            {
+              "name": "body",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a2222222-2222-4222-8222-222222222222",
+      "name": "Guard: recipient allowlist",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// ── Recipient allowlist gate ───────────────────────────────────────────────\n// The MODEL supplies `to`. An attacker who gets a prompt injection into an\n// inbound email can therefore choose it. This node is the control that stops\n// that turning Hermes into an open relay: a recipient that is not on this list\n// aborts the workflow before the SMTP node ever runs.\n//\n// Keep this list in sync with EMAIL_ALLOWED_USERS in the Hermes .env.\nconst ALLOWED = [\n  'deep@lakeb2b.com',\n  'f20221771@hyderabad.bits-pilani.ac.in',\n  'harshilkhandelwal71@gmail.com',\n  'hemang.k@championsmail.com',\n  'uma.s@championsmail.com',\n];\n\nconst MAX_SUBJECT = 200;\nconst MAX_BODY = 20000;\n\nconst out = [];\nfor (const item of $input.all()) {\n  const to = String(item.json.to ?? '').trim().toLowerCase();\n\n  if (!to) {\n    throw new Error('send_email: \"to\" is required');\n  }\n  if (!ALLOWED.includes(to)) {\n    // Deliberately explicit: this shows up in the n8n execution log AND comes\n    // back to Hermes as a tool error, so a blocked attempt is visible.\n    throw new Error(`send_email: recipient not permitted: ${to}`);\n  }\n\n  const subject = String(item.json.subject ?? '(no subject)').slice(0, MAX_SUBJECT);\n  const body = String(item.json.body ?? '').slice(0, MAX_BODY);\n\n  out.push({ json: { to, subject, body } });\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "a3333333-3333-4333-8333-333333333333",
+      "name": "Send Email",
+      "webhookId": "6eb44069-824c-4660-98bb-95ed68dd224c",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "fromEmail": "harshilchamp676@gmail.com",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.body }}",
+        "options": {}
+      },
+      "credentials": {
+        "smtp": {
+          "id": "V8JJ2uOkELFUCGc3",
+          "name": "Hermes Gmail SMTP"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Guard: recipient allowlist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guard: recipient allowlist": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
