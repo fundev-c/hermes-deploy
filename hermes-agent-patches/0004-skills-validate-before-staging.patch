@@ -1,0 +1,186 @@
+diff --git a/tests/tools/test_skill_prestage_validation.py b/tests/tools/test_skill_prestage_validation.py
+new file mode 100644
+index 0000000000..ed55fc8afc
+--- /dev/null
++++ b/tests/tools/test_skill_prestage_validation.py
+@@ -0,0 +1,91 @@
++"""hermes-deploy: skill writes are validated BEFORE staging.
++
++Staging first meant a skill whose description broke the 60-char budget sat in pending/ until
++`/skills approve` rejected it (2026-09-29 03a35120, 2026-09-30 06184f81) -- with the model gone and
++nobody left to fix the text. Now the model gets the rejection in-turn and can retry.
++"""
++import json
++import os
++import shutil
++import tempfile
++import unittest
++from unittest.mock import patch
++
++LONG = "Use when auditing a spreadsheet's data quality. Emit corrections as a separate sheet."  # 90
++SHORT = "Audit a spreadsheet and list corrections in a new sheet."  # 56
++
++
++def skill(name, desc):
++    return f"---\nname: {name}\ndescription: {desc}\n---\n# Body\nStep 1.\n"
++
++
++class _Gated:
++    allow = False
++    blocked = False
++    message = "staged for review"
++
++
++class TestPrestageValidation(unittest.TestCase):
++    def setUp(self):
++        self.home = tempfile.mkdtemp(prefix="skprestage_")
++        os.environ["HERMES_HOME"] = self.home
++        os.makedirs(os.path.join(self.home, "skills"), exist_ok=True)
++        import importlib
++
++        import tools.skill_manager_tool as smt
++        importlib.reload(smt)
++        self.smt = smt
++        self.staged = []
++
++    def tearDown(self):
++        shutil.rmtree(self.home, ignore_errors=True)
++
++    def _gated(self, **kw):
++        import tools.write_approval as wa
++
++        def fake_stage(area, payload, summary=None, origin=None):
++            self.staged.append(payload)
++            return {"id": f"p{len(self.staged)}"}
++        with patch.object(wa, "evaluate_gate", return_value=_Gated()), \
++             patch.object(wa, "stage_write", side_effect=fake_stage):
++            return json.loads(self.smt.skill_manage(**kw))
++
++    def test_flat_create_with_long_description_is_not_staged(self):
++        assert len(LONG) > 60
++        r = self._gated(action="create", name="data-quality-audit", content=skill("data-quality-audit", LONG))
++        self.assertFalse(r.get("success"), r)
++        self.assertIn("Not staged", r["error"])
++        self.assertIn("60-char", r["error"])
++        self.assertEqual(self.staged, [])
++
++    def test_flat_create_with_short_description_is_staged(self):
++        r = self._gated(action="create", name="data-quality-audit", content=skill("data-quality-audit", SHORT))
++        self.assertTrue(r.get("staged"), r)
++        self.assertEqual(len(self.staged), 1)
++
++    def test_batch_with_one_bad_op_stages_nothing_and_names_the_op(self):
++        r = self._gated(action="create", name="dqa", operations=[
++            {"action": "create", "name": "dqa", "content": skill("dqa", LONG)},
++            {"action": "write_file", "name": "dqa", "file_path": "references/a.md", "file_content": "a"},
++        ])
++        self.assertFalse(r.get("success"), r)
++        self.assertIn("operations[0]", r["error"])
++        self.assertEqual(self.staged, [])
++
++    def test_valid_batch_still_stages_and_replays(self):
++        r = self._gated(action="create", name="dqa", operations=[
++            {"action": "create", "name": "dqa", "content": skill("dqa", SHORT)},
++            {"action": "write_file", "name": "dqa", "file_path": "references/a.md", "file_content": "a"},
++        ])
++        self.assertTrue(r.get("staged"), r)
++        out = json.loads(self.smt.apply_skill_pending(self.staged[0]))
++        self.assertTrue(out["success"], out)
++
++    def test_bad_name_is_rejected_before_staging(self):
++        r = self._gated(action="create", name="../escape", content=skill("x", SHORT))
++        self.assertFalse(r.get("success"), r)
++        self.assertEqual(self.staged, [])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tools/skill_manager_batch.py b/tools/skill_manager_batch.py
+index 5b710935f9..71cb176a70 100644
+--- a/tools/skill_manager_batch.py
++++ b/tools/skill_manager_batch.py
+@@ -207,12 +207,20 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
+     if err is not None:
+         return err
+     if not _smt._skill_gate_bypass.get():
++        # hermes-deploy: reject in-turn anything approval would reject later (see _prestage_error).
++        def _precheck():
++            for i, op in enumerate(operations):
++                args = {k: op.get(k) for k in ("content", "category", "file_path", "file_content",
++                                              "old_string", "new_string", "absorbed_into")}
++                if (perr := _smt._prestage_error(op.get("action", ""), names[i], args)) is not None:
++                    return _smt._not_staged(perr, f" (operations[{i}], {op.get('action')})")
++            return None
+         # Approval gate for the WHOLE batch as one pending write.
+         def _staging(wa):
+             acts = ", ".join(op["action"] for op in operations)
+             gist = f"batch({len(operations)} ops: {acts}) on {', '.join(sorted(set(names)))}"
+             return {"action": "batch", "operations": operations}, gist
+-        staged = _smt._run_write_gate(_staging)
++        staged = _smt._run_write_gate(_staging, _precheck)
+         if staged is not None:
+             return staged
+     # Every target's lock is held from the snapshot through commit or rollback; the per-op
+diff --git a/tools/skill_manager_tool.py b/tools/skill_manager_tool.py
+index abe23bbc07..d42be5b584 100644
+--- a/tools/skill_manager_tool.py
++++ b/tools/skill_manager_tool.py
+@@ -600,7 +600,7 @@ _skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
+     "skill_gate_bypass", default=False)
+ 
+ 
+-def _run_write_gate(build_staging):
++def _run_write_gate(build_staging, precheck=None):
+     """Shared write gate: None to proceed, else a JSON tool result (blocked/staged).
+     ``build_staging(wa) -> (payload, gist)`` runs only when staging. Fails open if
+     write_approval cannot be imported."""
+@@ -613,12 +613,37 @@ def _run_write_gate(build_staging):
+         return None
+     if decision.blocked:
+         return tool_error(decision.message, success=False)
++    # hermes-deploy: only on the staging path -- ungated writes keep their own apply-time errors.
++    if precheck is not None and (err := precheck()) is not None:
++        return err
+     payload, gist = build_staging(wa)
+     record = wa.stage_write(wa.SKILLS, payload, summary=gist, origin=wa.current_origin())
+     return json.dumps({"success": True, "staged": True, "pending_id": record["id"],
+                        "gist": gist, "message": decision.message}, ensure_ascii=False)
+ 
+ 
++def _prestage_error(action: str, name: str, args: dict) -> Optional[str]:
++    """hermes-deploy: the apply-time checks that need no disk state, run BEFORE a write is staged.
++    Staging first meant a 90-char description sat in pending/ until /skills approve rejected it --
++    with the model long gone and nobody left to fix the text. Rejecting in-turn lets it retry."""
++    from tools.skill_manager_batch import _op_shape_error
++    if (err := _op_shape_error(action, args)) is not None:
++        return err
++    if action == "create":
++        return (_validate_name(name) or _validate_frontmatter(args.get("content") or "", new_skill=True)
++                or _validate_content_size(args.get("content") or ""))
++    if action == "edit":
++        return _validate_frontmatter(args.get("content") or "") or _validate_content_size(args.get("content") or "")
++    if action == "write_file" and args.get("file_content") is not None:
++        return _validate_content_size(args["file_content"], label=args.get("file_path") or "file")
++    return None
++
++
++def _not_staged(err: str, where: str = "") -> str:
++    return tool_error(f"Not staged{where}: {err} Nothing was saved; fix it and call skill_manage again.",
++                      success=False)
++
++
+ def _apply_skill_write_gate(action, name, **payload_kwargs):
+     """Flat-shape gate: stage the full kwargs so approval can replay them; bypassed during replay."""
+     if action not in _ACTION_HANDLERS or _skill_gate_bypass.get():
+@@ -629,7 +654,10 @@ def _apply_skill_write_gate(action, name, **payload_kwargs):
+         gist_kw = {k: payload_kwargs.get(k) or ""
+                    for k in ("content", "file_path", "old_string", "new_string")}
+         return payload, wa.skill_gist(action, name, **gist_kw)
+-    return _run_write_gate(_staging)
++    def _precheck():
++        err = _prestage_error(action, name, payload_kwargs)
++        return _not_staged(err) if err is not None else None
++    return _run_write_gate(_staging, _precheck)
+ 
+ 
+ _FLAT_OP_KEYS = ("content", "category", "file_path", "file_content", "old_string", "new_string",

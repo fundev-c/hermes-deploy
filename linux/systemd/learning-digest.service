@@ -1,0 +1,8 @@
+[Unit]
+Description=Hermes learning digest (new lessons and bad grades, mailed to the owner)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python %h/.hermes/profiles/team/plugins/learning/digest.py --home %h/.hermes/profiles/team
+MemoryMax=100M
+Nice=10

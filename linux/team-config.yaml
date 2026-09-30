@@ -1,0 +1,545 @@
+_config_version: 49
+agent:
+  max_turns: 150
+  personalities: {}
+  reasoning_effort: high
+  verbose: false
+  pre_verify_platforms:
+  - email
+  - cron
+  max_verify_nudges: 3
+approvals:
+  destructive_slash_confirm: false
+browser:
+  backend: browser-use
+  extension_control:
+    enabled: false
+  inactivity_timeout: 120
+code_execution:
+  max_tool_calls: 50
+  timeout: 300
+compression:
+  codex_app_server_auto: native
+  codex_gpt55_autoraise: true
+  codex_responses_compact_threshold: 200000
+  codex_responses_native: false
+  enabled: true
+  idle_compact_after_seconds: 0
+  max_attempts: 3
+  min_tail_user_messages: 1
+  proactive_prune_min_reclaim_tokens: 4096
+  proactive_prune_min_result_chars: 8000
+  proactive_prune_tokens: 0
+  progress_notices: false
+  protect_first_n: 3
+  protect_last_n: 20
+  target_ratio: 0.2
+  threshold: 0.5
+computer_use:
+  backend: cua
+database:
+  journal_mode: wal
+delegation:
+  max_iterations: 250
+display:
+  background_process_notifications: concise
+  bell_on_complete: false
+  busy_ack_detail: true
+  busy_input_mode: interrupt
+  cleanup_progress: false
+  compact: false
+  interim_assistant_messages: true
+  long_running_notifications: true
+  show_reasoning: false
+  skin: default
+  streaming: true
+  tool_progress: all
+fallback_providers:
+- model: meituan/longcat-2.5-preview:free
+  provider: nous
+- model: stepfun/step-3.7-flash:free
+  provider: nous
+- model: upstage/solar-pro4:free
+  provider: nous
+- model: meituan/longcat-2.0:free
+  provider: nous
+- base_url: http://127.0.0.1:8080/v1
+  model: Qwen3-1.7B
+  provider: custom
+group_sessions_per_user: true
+hooks:
+  post_tool_call:
+  - command: 'sh -c ''cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0; d=$PWD;
+      while [ ! -f "$d/.bdrive/config.json" ]; do case "$d" in ""|/) d=; break;; esac;
+      d=${d%/*}; done; [ -n "$d" ] || case "$PWD" in *"
+
+      "*) exit 0;; esac; [ -n "$d" ] || grep -qF "\"$PWD/" "${BDRIVE_HOME:-$HOME/.bdrive}/mounts.json"
+      2>/dev/null || exit 0; command -v bdrive >/dev/null || exit 0; s=; [ -t 0 ]
+      || s=$(head -c 8192 2>/dev/null | tr -d \" | sed -n "s/.*session_id[[:space:]]*:[[:space:]]*\([a-zA-Z0-9_-]*\).*/\1/p"
+      | head -n 1); if [ -n "$s" ]; then bdrive sync . --note "hermes session $s"
+      >/dev/null 2>&1 || true; else bdrive sync . >/dev/null 2>&1 || true; fi'''
+    matcher: write_file|patch
+    timeout: 30
+  - command: 'sh -c ''cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0; d=$PWD;
+      while [ ! -f "$d/.bdrive/config.json" ]; do case "$d" in ""|/) d=; break;; esac;
+      d=${d%/*}; done; [ -n "$d" ] || case "$PWD" in *"
+
+      "*) exit 0;; esac; [ -n "$d" ] || grep -qF "\"$PWD/" "${BDRIVE_HOME:-$HOME/.bdrive}/mounts.json"
+      2>/dev/null || exit 0; command -v bdrive >/dev/null || exit 0; bdrive read-log
+      . >/dev/null 2>&1 || true'''
+    matcher: read_file|grep|bash
+    timeout: 30
+  pre_llm_call:
+  - command: 'sh -c ''cd "${CLAUDE_PROJECT_DIR:-.}" 2>/dev/null || exit 0; d=$PWD;
+      while [ ! -f "$d/.bdrive/config.json" ]; do case "$d" in ""|/) d=; break;; esac;
+      d=${d%/*}; done; [ -n "$d" ] || case "$PWD" in *"
+
+      "*) exit 0;; esac; [ -n "$d" ] || grep -qF "\"$PWD/" "${BDRIVE_HOME:-$HOME/.bdrive}/mounts.json"
+      2>/dev/null || exit 0; command -v bdrive >/dev/null || exit 0; s=; [ -t 0 ]
+      || s=$(head -c 8192 2>/dev/null | tr -d \" | sed -n "s/.*session_id[[:space:]]*:[[:space:]]*\([a-zA-Z0-9_-]*\).*/\1/p"
+      | head -n 1); if [ -n "$s" ]; then bdrive sync . --note "hermes session $s"
+      >/dev/null 2>&1 || true; else bdrive sync . >/dev/null 2>&1 || true; fi'''
+    timeout: 30
+kanban:
+  review_dispatch: true
+known_builtin_toolsets:
+  cli:
+  - browser
+  - clarify
+  - code_execution
+  - computer_use
+  - connections
+  - context_engine
+  - cronjob
+  - delegation
+  - discord
+  - discord_admin
+  - file
+  - homeassistant
+  - image_gen
+  - kanban
+  - memory
+  - session_search
+  - skills
+  - spotify
+  - stt
+  - terminal
+  - todo
+  - tts
+  - video
+  - video_gen
+  - vision
+  - web
+  - x_search
+  - yuanbao
+known_plugin_toolsets:
+  api_server:
+  - beardrive
+  - learning
+  bluebubbles:
+  - beardrive
+  - learning
+  cli:
+  - a2a
+  - beardrive
+  - spotify
+  - learning
+  dingtalk:
+  - beardrive
+  - learning
+  discord:
+  - beardrive
+  - learning
+  feishu:
+  - beardrive
+  - learning
+  google_chat:
+  - beardrive
+  - learning
+  homeassistant:
+  - beardrive
+  - learning
+  matrix:
+  - beardrive
+  - learning
+  mattermost:
+  - beardrive
+  - learning
+  qqbot:
+  - beardrive
+  - learning
+  signal:
+  - beardrive
+  - learning
+  slack:
+  - beardrive
+  - learning
+  teams:
+  - beardrive
+  - learning
+  telegram:
+  - beardrive
+  - learning
+  webhook:
+  - beardrive
+  - learning
+  wecom:
+  - beardrive
+  - learning
+  wecom_callback:
+  - beardrive
+  - learning
+  weixin:
+  - beardrive
+  - learning
+  whatsapp:
+  - beardrive
+  - learning
+  whatsapp_cloud:
+  - beardrive
+  - learning
+  yuanbao:
+  - beardrive
+  - learning
+mcp_servers:
+  n8n-tools:
+    connect_timeout: 60
+    enabled: true
+    headers:
+      Authorization: Bearer ${N8N_MCP_TOKEN}
+    keepalive_interval: 60
+    timeout: 120
+    trust: full
+    url: http://127.0.0.1:5688/mcp/hermes
+memory:
+  memory_char_limit: 2200
+  memory_enabled: true
+  nudge_interval: 10
+  user_char_limit: 1375
+  user_profile_enabled: true
+model:
+  base_url: https://inference-api.nousresearch.com/v1
+  default: stealth/space-bunny-alpha
+  provider: nous
+onboarding:
+  seen:
+    busy_input_prompt: true
+    openclaw_residue_cleanup: true
+platform_toolsets:
+  cli:
+  - browser
+  - clarify
+  - code_execution
+  - computer_use
+  - connections
+  - cronjob
+  - delegation
+  - file
+  - kanban
+  - memory
+  - session_search
+  - skills
+  - terminal
+  - todo
+  - tts
+  - vision
+  - web
+  cron:
+  - beardrive
+  - skills
+  - terminal
+  - learning
+  discord:
+  - hermes-discord
+  email:
+  - beardrive
+  - skills
+  - terminal
+  - cronjob
+  - learning
+  google_chat:
+  - hermes-google_chat
+  homeassistant:
+  - hermes-homeassistant
+  qqbot:
+  - hermes-qqbot
+  signal:
+  - hermes-signal
+  slack:
+  - hermes-slack
+  teams:
+  - hermes-teams
+  telegram:
+  - hermes-telegram
+  whatsapp:
+  - hermes-whatsapp
+  yuanbao:
+  - hermes-yuanbao
+plugins:
+  disabled: []
+  enabled:
+  - beardrive
+  - learning
+  entries:
+    beardrive:
+      allow_tool_override: false
+      settings:
+        heartbeat_path: /home/hemang/.bdrive/volumes/m-9b26d433/sync.json
+        hub_url: http://localhost:4173
+    learning:
+      allow_tool_override: false
+      settings:
+        silence_days: 3
+        verifier: true
+prompt_caching:
+  cache_ttl: 5m
+runtime:
+  nofile_soft_limit: 4096
+session_reset:
+  at_hour: 4
+  idle_minutes: 1440
+  mode: none
+skills:
+  creation_nudge_interval: 15
+  guard_agent_created: true
+  platform_disabled:
+    cron:
+    - airtable
+    - apple-notes
+    - apple-reminders
+    - architecture-diagram
+    - arxiv
+    - ascii-art
+    - ascii-video
+    - baoyu-infographic
+    - blocked-page-recovery
+    - blogwatcher
+    - box
+    - claude-code
+    - claude-design
+    - codebase-inspection
+    - codex
+    - comfyui
+    - competitor-news-monitor
+    - computer-use
+    - design-md
+    - document-to-action-items
+    - docx
+    - dogfood
+    - email-inbox-triage
+    - evaluating-llms-harness
+    - excalidraw
+    - findmy
+    - gif-search
+    - github
+    - github-auth
+    - github-code-review
+    - github-issue-to-pr
+    - github-issues
+    - github-pr-workflow
+    - github-repo-management
+    - google-workspace
+    - grounded-citations
+    - hermes-agent
+    - hermes-agent-skill-authoring
+    - himalaya
+    - huggingface-hub
+    - humanizer
+    - imessage
+    - inspecting-hermes-desktop-dom
+    - llama-cpp
+    - llm-wiki
+    - manim-video
+    - maps
+    - meeting-action-items
+    - merge-reconciler
+    - nano-pdf
+    - node-inspect-debugger
+    - notion
+    - obsidian
+    - ocr-and-documents
+    - opencode
+    - openhue
+    - p5js
+    - pdf
+    - plan
+    - popular-web-designs
+    - powerpoint
+    - pretext
+    - product-price-monitor
+    - python-debugpy
+    - requesting-code-review
+    - research-paper-writing
+    - sdlc-review
+    - serving-llms-vllm
+    - session-librarian
+    - simplify-code
+    - sketch
+    - songsee
+    - songwriting-and-ai-music
+    - spike
+    - systematic-debugging
+    - teams-meeting-pipeline
+    - test-driven-development
+    - touchdesigner-mcp
+    - weekly-review-planning
+    - weights-and-biases
+    - xlsx
+    - xurl
+    - youtube-content
+    email:
+    - airtable
+    - apple-notes
+    - apple-reminders
+    - architecture-diagram
+    - arxiv
+    - ascii-art
+    - ascii-video
+    - baoyu-infographic
+    - blocked-page-recovery
+    - blogwatcher
+    - box
+    - claude-code
+    - claude-design
+    - codebase-inspection
+    - codex
+    - comfyui
+    - competitor-news-monitor
+    - computer-use
+    - design-md
+    - document-to-action-items
+    - docx
+    - dogfood
+    - email-inbox-triage
+    - evaluating-llms-harness
+    - excalidraw
+    - findmy
+    - gif-search
+    - github
+    - github-auth
+    - github-code-review
+    - github-issue-to-pr
+    - github-issues
+    - github-pr-workflow
+    - github-repo-management
+    - google-workspace
+    - grounded-citations
+    - hermes-agent
+    - hermes-agent-skill-authoring
+    - himalaya
+    - huggingface-hub
+    - humanizer
+    - imessage
+    - inspecting-hermes-desktop-dom
+    - llama-cpp
+    - llm-wiki
+    - manim-video
+    - maps
+    - meeting-action-items
+    - merge-reconciler
+    - nano-pdf
+    - node-inspect-debugger
+    - notion
+    - obsidian
+    - ocr-and-documents
+    - opencode
+    - openhue
+    - p5js
+    - pdf
+    - plan
+    - popular-web-designs
+    - powerpoint
+    - pretext
+    - product-price-monitor
+    - python-debugpy
+    - requesting-code-review
+    - research-paper-writing
+    - sdlc-review
+    - serving-llms-vllm
+    - session-librarian
+    - simplify-code
+    - sketch
+    - songsee
+    - songwriting-and-ai-music
+    - spike
+    - systematic-debugging
+    - teams-meeting-pipeline
+    - test-driven-development
+    - touchdesigner-mcp
+    - weekly-review-planning
+    - weights-and-biases
+    - xlsx
+    - xurl
+    - youtube-content
+  write_approval: true
+streaming:
+  enabled: false
+stt:
+  enabled: true
+  language: en
+  local:
+    model: base
+  openai:
+    language: ''
+    model: whisper-1
+telemetry:
+  shared_metrics:
+    enabled: false
+terminal:
+  backend: docker
+  container_cpu: 1
+  container_disk: 2048
+  container_memory: 1024
+  container_persistent: false
+  cwd: /workspace
+  docker_mount_cwd_to_workspace: false
+  home_mode: auto
+  lifetime_seconds: 900
+  timeout: 180
+  docker_image: hermes-sandbox:1
+  docker_persist_across_processes: false
+  docker_volumes: []
+  docker_forward_env: []
+  docker_run_as_host_user: true
+  docker_network: true
+  docker_env:
+    HTTP_PROXY: http://hermes-egress:3128
+    HTTPS_PROXY: http://hermes-egress:3128
+    http_proxy: http://hermes-egress:3128
+    https_proxy: http://hermes-egress:3128
+    HOME: /root
+  docker_extra_args:
+  - --network
+  - hermes-sbx
+  - --read-only
+tool_loop_guardrails:
+  hard_stop_after:
+    exact_failure: 5
+    idempotent_no_progress: 5
+    same_tool_failure: 8
+  hard_stop_enabled: false
+  warn_after:
+    exact_failure: 2
+    idempotent_no_progress: 2
+    same_tool_failure: 3
+  warnings_enabled: true
+updates:
+  check: false
+  backup_keep: 5
+  non_interactive_local_changes: stash
+  pre_update_backup: false
+tools:
+  tool_search:
+    enabled: 'off'
+platforms:
+  email:
+    allow_admin_from:
+    - no-email-admins@admin.invalid
+    enabled: true
+    group_allow_admin_from:
+    - no-email-admins@admin.invalid
+    user_allowed_commands:
+    - new
+gateway:
+  strict: true
+  trust_recent_files: false

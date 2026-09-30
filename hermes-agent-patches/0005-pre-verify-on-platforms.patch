@@ -1,0 +1,146 @@
+diff --git a/agent/turn_stop_gates.py b/agent/turn_stop_gates.py
+index c9f9c304de..50fbd2a1ca 100644
+--- a/agent/turn_stop_gates.py
++++ b/agent/turn_stop_gates.py
+@@ -49,16 +49,19 @@ def _verify_on_stop_nudge(agent) -> Optional[str]:
+     return None
+ 
+ 
+-def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
++def _pre_verify_nudge(agent, final_response, attempt: int, messages=None) -> Optional[str]:
+     """After code edits a registered ``pre_verify`` hook may keep the agent going one
+-    more turn; no default continuation cost."""
++    more turn; no default continuation cost. hermes-deploy: platforms listed in
++    ``agent.pre_verify_platforms`` run it on every turn (their work is sandboxed, not edits)."""
+     _edited = sorted(getattr(agent, "_turn_file_mutation_paths", set()) or [])
+     try:
+-        from agent.verify_hooks import max_verify_nudges
++        from agent.verify_hooks import max_verify_nudges, pre_verify_platforms
+         from hermes_cli.lifecycle import has_hook
+         from hermes_cli.plugins import get_pre_verify_continue_message
+ 
+-        if _edited and has_hook("pre_verify") and attempt < max_verify_nudges():
++        _platform = (getattr(agent, "platform", "") or "").lower()
++        _opted_in = bool(_platform) and _platform in pre_verify_platforms()
++        if (_edited or _opted_in) and has_hook("pre_verify") and attempt < max_verify_nudges():
+             # Posture is fixed for the session — resolve once + cache.
+             coding = getattr(agent, "_resolved_is_coding", None)
+             if coding is None:
+@@ -70,6 +73,7 @@ def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
+                 platform=getattr(agent, "platform", "") or "",
+                 model=getattr(agent, "model", "") or "", coding=coding, attempt=attempt,
+                 final_response=final_response, changed_paths=_edited,
++                messages=list(messages or []),
+             )
+     except Exception:
+         logger.debug("pre_verify hook check failed", exc_info=True)
+@@ -139,7 +143,7 @@ def apply_stop_gates(
+         return verdict
+ 
+     _attempt = getattr(agent, "_pre_verify_nudges", 0)
+-    _verify_nudge2 = _pre_verify_nudge(agent, final_response, _attempt)
++    _verify_nudge2 = _pre_verify_nudge(agent, final_response, _attempt, messages)
+     if _verify_nudge2:
+         agent._pre_verify_nudges = _attempt + 1
+         final_msg["finish_reason"] = "verify_hook_continue"
+diff --git a/agent/verify_hooks.py b/agent/verify_hooks.py
+index 7b554bcb5b..da0803a016 100644
+--- a/agent/verify_hooks.py
++++ b/agent/verify_hooks.py
+@@ -41,6 +41,16 @@ def coding_verify_guidance(config: Optional[dict[str, Any]] = None) -> Optional[
+     return CODING_VERIFY_GUIDANCE
+ 
+ 
++def pre_verify_platforms(config: Optional[dict[str, Any]] = None) -> frozenset:
++    """hermes-deploy: platforms whose turns run ``pre_verify`` even without host file edits
++    (``agent.pre_verify_platforms``). Email/cron work happens in a sandbox, so it never counts
++    as an edit, and a task verifier would otherwise never be asked."""
++    raw = _agent_cfg(config).get("pre_verify_platforms") or []
++    if isinstance(raw, str):
++        raw = raw.split(",")
++    return frozenset(str(p).strip().lower() for p in raw if str(p).strip())
++
++
+ def _agent_cfg(config: Optional[dict[str, Any]]) -> dict[str, Any]:
+     if config is None:
+         try:
+diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py
+index 15fa39d715..85a9b2b808 100644
+--- a/hermes_cli/plugins.py
++++ b/hermes_cli/plugins.py
+@@ -1915,6 +1915,7 @@ def _dispatch_pre_tool_call_hooks(
+ def get_pre_verify_continue_message(
+     *, session_id: str = "", platform: str = "", model: str = "", coding: bool = False,
+     attempt: int = 0, final_response: str = "", changed_paths: Optional[List[str]] = None,
++    messages: Optional[List[Any]] = None,
+ ) -> Optional[str]:
+     """Check ``pre_verify`` hooks for ``{"action": "continue", "message"}`` (or Claude-Code Stop
+     ``{"decision": "block", "reason"}``) to keep the turn going; first non-empty message wins, any
+@@ -1922,6 +1923,7 @@ def get_pre_verify_continue_message(
+     hook_results = invoke_hook(
+         "pre_verify", session_id=session_id, platform=platform, model=model, coding=coding,
+         attempt=attempt, final_response=final_response, changed_paths=list(changed_paths or []),
++        messages=list(messages or []),
+     )
+     for result in hook_results:
+         if not isinstance(result, dict):
+diff --git a/tests/agent/test_pre_verify_platforms.py b/tests/agent/test_pre_verify_platforms.py
+new file mode 100644
+index 0000000000..0f5215b798
+--- /dev/null
++++ b/tests/agent/test_pre_verify_platforms.py
+@@ -0,0 +1,54 @@
++"""hermes-deploy patch 0005: ``agent.pre_verify_platforms`` runs pre_verify without host file edits.
++
++Email/cron work happens in a Docker sandbox, which never registers as a host file mutation, so a
++task verifier registered on pre_verify was never consulted. The hook also receives the messages."""
++from types import SimpleNamespace
++from unittest.mock import patch
++
++import pytest
++
++from agent import turn_stop_gates as g
++from agent.verify_hooks import pre_verify_platforms
++
++
++def _agent(platform, edited=()):
++    return SimpleNamespace(platform=platform, session_id="s1", model="m",
++                           _turn_file_mutation_paths=set(edited), _resolved_is_coding=False)
++
++
++@pytest.fixture
++def hooks():
++    seen = {}
++
++    def fake_msg(**kw):
++        seen.update(kw)
++        return "verifier says: fix it"
++    with patch("hermes_cli.lifecycle.has_hook", side_effect=lambda n: n == "pre_verify"), \
++         patch("hermes_cli.plugins.get_pre_verify_continue_message", side_effect=fake_msg), \
++         patch("agent.verify_hooks.max_verify_nudges", return_value=3), \
++         patch("agent.verify_hooks.pre_verify_platforms", return_value=frozenset({"email", "cron"})):
++        yield seen
++
++
++def test_opted_in_platform_fires_without_edits_and_gets_messages(hooks):
++    msgs = [{"role": "user", "content": "do it"}]
++    assert g._pre_verify_nudge(_agent("email"), "answer", 0, msgs) == "verifier says: fix it"
++    assert hooks["messages"] == msgs and hooks["platform"] == "email"
++
++
++def test_other_platforms_still_need_an_edit(hooks):
++    assert g._pre_verify_nudge(_agent("telegram"), "answer", 0, []) is None
++    assert g._pre_verify_nudge(_agent("telegram", ["a.py"]), "answer", 0, []) == "verifier says: fix it"
++
++
++def test_attempt_cap_still_applies(hooks):
++    assert g._pre_verify_nudge(_agent("email"), "answer", 3, []) is None
++
++
++@pytest.mark.parametrize("cfg,want", [
++    ({}, frozenset()),
++    ({"agent": {"pre_verify_platforms": ["Email", " cron "]}}, frozenset({"email", "cron"})),
++    ({"agent": {"pre_verify_platforms": "email,cron"}}, frozenset({"email", "cron"})),
++])
++def test_config_parsing(cfg, want):
++    assert pre_verify_platforms(cfg) == want

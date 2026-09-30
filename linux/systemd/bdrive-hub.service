@@ -1,0 +1,12 @@
+[Unit]
+Description=BearDrive hub (localhost:4173)
+After=network.target
+
+[Service]
+Environment=BDRIVE_HOME=%h/bdrive-hub
+ExecStart=%h/bin/bdrive serve -c %h/bdrive-hub/hub.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

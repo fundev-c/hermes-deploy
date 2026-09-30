@@ -1,0 +1,224 @@
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+index 9bffddc072..9bb32a26a7 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -397,17 +397,26 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str]:
+     the full default set (#111380). The raise reaches ``run_job``'s failure path, which records the
+     error on the job and opens an incident, so the operator sees it instead of a widened run.
+     """
+-    per_job = job.get("enabled_toolsets")
+-    if per_job:
+-        return _merge_mcp_into_per_job_toolsets(list(per_job), cfg or {})
+     try:
+         from hermes_cli.tools_config import _get_platform_tools  # lazy: avoid heavy import at cron module load
+-        return sorted(_get_platform_tools(cfg or {}, "cron"))
++        platform = _get_platform_tools(cfg or {}, "cron")
+     except Exception as exc:
+         raise RuntimeError(
+             "Cron toolset resolution failed, so this run was refused rather than given every "
+             f"tool. Check `platform_toolsets.cron` in config.yaml (`hermes cron doctor`): {exc}"
+         ) from exc
++    per_job = job.get("enabled_toolsets")
++    if not per_job:
++        return sorted(platform)
++    # hermes-deploy: a per-job list (model-settable via the cronjob tool) may only NARROW
++    # ``platform_toolsets.cron``, never widen it -- otherwise any job creator gets e.g. terminal.
++    merged = _merge_mcp_into_per_job_toolsets(list(per_job), cfg or {})
++    kept = [t for t in merged if t in platform]
++    dropped = [t for t in merged if t not in platform]
++    if dropped:
++        logger.warning("Cron job %s: dropped toolsets outside platform_toolsets.cron: %s",
++                       job.get("id", "?"), dropped)
++    return kept or sorted(platform)
+ 
+ 
+ def _resolve_job_reasoning_config(job: dict, cfg: dict, model: str) -> dict | None:
+diff --git a/tests/cron/test_cron_job_toolsets_clamped.py b/tests/cron/test_cron_job_toolsets_clamped.py
+new file mode 100644
+index 0000000000..7b538d8287
+--- /dev/null
++++ b/tests/cron/test_cron_job_toolsets_clamped.py
+@@ -0,0 +1,28 @@
++"""hermes-deploy: a cron job's own ``enabled_toolsets`` may only narrow ``platform_toolsets.cron``.
++
++On 2026-09-30 an email-created job asked for ``["terminal"]`` and got it, although cron's platform
++list was ``[beardrive, cronjob, skills]``. The per-job list is model-settable via the cronjob tool."""
++from cron.scheduler import _resolve_cron_enabled_toolsets
++
++CFG = {"platform_toolsets": {"cron": ["skills", "todo"]}, "mcp_servers": {}}
++
++
++def test_job_cannot_widen_past_cron_platform_list():
++    result = _resolve_cron_enabled_toolsets({"id": "j1", "enabled_toolsets": ["terminal", "file", "skills"]}, CFG)
++    assert "terminal" not in result
++    assert "file" not in result
++    assert result == ["skills"]
++
++
++def test_job_asking_only_for_disallowed_toolsets_gets_the_platform_list():
++    result = _resolve_cron_enabled_toolsets({"id": "j2", "enabled_toolsets": ["terminal"]}, CFG)
++    assert set(result) == {"skills", "todo"}
++
++
++def test_job_may_narrow():
++    assert _resolve_cron_enabled_toolsets({"id": "j3", "enabled_toolsets": ["todo"]}, CFG) == ["todo"]
++
++
++def test_terminal_allowed_when_cron_platform_list_has_it():
++    cfg = {"platform_toolsets": {"cron": ["skills", "terminal"]}, "mcp_servers": {}}
++    assert "terminal" in _resolve_cron_enabled_toolsets({"enabled_toolsets": ["terminal"]}, cfg)
+diff --git a/tests/cron/test_scheduler.py b/tests/cron/test_scheduler.py
+index 3a9ceade70..5ce435211d 100644
+--- a/tests/cron/test_scheduler.py
++++ b/tests/cron/test_scheduler.py
+@@ -158,10 +158,10 @@ class TestPerJobToolsetMcpMerge:
+         job = {"enabled_toolsets": None}
+         with pytest.raises(RuntimeError, match="toolset resolution failed"):
+             _resolve_cron_enabled_toolsets(job, {"platform_toolsets": "oops"})
+-        # Per-job lists never touch the platform resolver: an unknown name still resolves.
+-        assert _resolve_cron_enabled_toolsets(
+-            {"enabled_toolsets": ["nonexistent_ts"]}, {"platform_toolsets": "oops", "mcp_servers": {}}
+-        ) == ["nonexistent_ts"]
++        # hermes-deploy: per-job lists are clamped to the platform list, so they fail closed too.
++        with pytest.raises(RuntimeError, match="toolset resolution failed"):
++            _resolve_cron_enabled_toolsets(
++                {"enabled_toolsets": ["nonexistent_ts"]}, {"platform_toolsets": "oops", "mcp_servers": {}})
+ 
+ 
+ class TestResolveOrigin:
+diff --git a/tests/security/test_beardrive_cross_tool_containment.py b/tests/security/test_beardrive_cross_tool_containment.py
+index 6fcd2a75c4..e4f119a20d 100644
+--- a/tests/security/test_beardrive_cross_tool_containment.py
++++ b/tests/security/test_beardrive_cross_tool_containment.py
+@@ -6,7 +6,7 @@ into the hermetic HERMES_HOME, never read or written in place -- because the
+ perimeter is configuration, and a unit test over a synthetic config would pass
+ while the real one leaked.
+ 
+-Three contracts:
++Contracts:
+ 
+ 1. ``email`` and ``cron`` carry the ``drive_*`` tools and none of the generic
+    filesystem/exec tools that would bypass the jail (parent PRD 3.9).
+@@ -17,18 +17,33 @@ Three contracts:
+ 3. Both 3.9 measurement traps are encoded, not commented: the catalog is read
+    with ``HERMES_GATEWAY_SESSION=1`` and ``skip_tool_search_assembly=True``;
+    without them the probe measures a different catalog than the gateway serves.
++4. (hermes-deploy, 2026-09-30) ``terminal`` may reach email/cron only when that profile's
++   terminal is the locked Docker sandbox: no host mounts, no forwarded env, a read-only
++   root, the internal ``hermes-sbx`` network, and a fresh sandbox per session. The drive
++   is reachable from it only through ``drive_to_sandbox``/``sandbox_to_drive``.
++5. A cron job's own ``enabled_toolsets`` cannot widen past ``platform_toolsets.cron`` (patch 0002).
++
++The deployed home is ``$HERMES_DEPLOYED_HOME``, else the ``team`` profile (which owns email on
++the Linux box), else the Hermes home this checkout lives in.
+ """
+ 
++import os
+ import shutil
+ from pathlib import Path
+ 
+ import pytest
+ 
+-DEPLOYED_HOME = Path(__file__).resolve().parents[3]
++_HOME = Path(__file__).resolve().parents[3]
++DEPLOYED_HOME = Path(os.environ.get("HERMES_DEPLOYED_HOME")
++                     or (_HOME / "profiles" / "team" if (_HOME / "profiles" / "team" / "config.yaml").is_file() else _HOME))
+ JAILED_PLATFORMS = ("email", "cron")
+ DRIVE_TOOLS = {"drive_list", "drive_read", "drive_search", "drive_save_attachment", "drive_status"}
+-BYPASS_TOOLS = {"read_file", "search_files", "write_file", "patch", "terminal",
+-                "execute_code", "delegate_task", "computer_use"}
++# terminal is not here: it is allowed on a jailed platform only behind the sandbox contract below.
++# read_file/write_file/patch/search_files and execute_code share the terminal backend but stay out:
++# a model-facing file API is exactly what the drive jail exists to replace.
++BYPASS_TOOLS = {"read_file", "search_files", "write_file", "patch",
++                "execute_code", "delegate_task", "computer_use", "browser_navigate"}
++SANDBOX_NETWORK = "hermes-sbx"
+ 
+ pytestmark = pytest.mark.skipif(
+     not ((DEPLOYED_HOME / "config.yaml").is_file() and (DEPLOYED_HOME / "plugins" / "beardrive").is_dir()),
+@@ -42,8 +57,13 @@ def deployed_config(tmp_path, monkeypatch):
+     import os
+     home = Path(os.environ["HERMES_HOME"])
+     shutil.copy2(DEPLOYED_HOME / "config.yaml", home / "config.yaml")
+-    shutil.copytree(DEPLOYED_HOME / "plugins" / "beardrive", home / "plugins" / "beardrive",
+-                    ignore=shutil.ignore_patterns("__pycache__", "test_*.py"))
++    if (DEPLOYED_HOME / ".env").is_file():  # TERMINAL_* in .env is part of the terminal policy
++        (home / ".env").write_text("".join(
++            ln for ln in (DEPLOYED_HOME / ".env").read_text().splitlines(True) if ln.startswith("TERMINAL_")))
++    for plugin in ("beardrive", "learning"):
++        if (DEPLOYED_HOME / "plugins" / plugin).is_dir():
++            shutil.copytree(DEPLOYED_HOME / "plugins" / plugin, home / "plugins" / plugin,
++                            ignore=shutil.ignore_patterns("__pycache__", "test_*.py"))
+     mount = tmp_path / "BearDrive"
+     (mount / ".bdrive").mkdir(parents=True)
+     monkeypatch.setenv("BEARDRIVE_ROOT", str(mount))
+@@ -93,12 +113,66 @@ def test_learned_skills_are_staged_and_no_emailer_can_approve_them(deployed_conf
+             "approval is meant to happen only at this PC")
+ 
+ 
+-def test_beardrive_toolset_resolves_only_on_the_jailed_platforms(deployed_config):
++@pytest.mark.parametrize("toolset", ["beardrive", "learning"])
++def test_plugin_toolset_resolves_only_on_the_jailed_platforms(deployed_config, toolset):
+     from hermes_cli.tools_config import PLATFORMS, _get_platform_tools
++    if toolset == "learning" and not (DEPLOYED_HOME / "plugins" / "learning").is_dir():
++        pytest.skip("learning plugin not deployed")
+     leaking = sorted(
+         p for p in PLATFORMS
+         if p not in JAILED_PLATFORMS
+-        and "beardrive" in _get_platform_tools(deployed_config, p, include_default_mcp_servers=False)
++        and toolset in _get_platform_tools(deployed_config, p, include_default_mcp_servers=False)
+     )
+-    assert not leaking, f"beardrive is ambient on {leaking}; add it to known_plugin_toolsets for each"
++    assert not leaking, f"{toolset} is ambient on {leaking}; add it to known_plugin_toolsets for each"
+     assert set(JAILED_PLATFORMS) <= set(PLATFORMS)
++
++
++def _terminal_policy(home):
++    from tools.terminal_scope import build_profile_terminal_scope
++    return build_profile_terminal_scope(Path(home))
++
++
++def test_terminal_on_a_jailed_platform_is_the_locked_sandbox(deployed_config):
++    import json
++
++    if not any("terminal" in _catalog(deployed_config, p) for p in JAILED_PLATFORMS):
++        pytest.skip("no terminal on email/cron: nothing to contain")
++    from tools.terminal_tool import _docker_has_host_access
++
++    home = os.environ["HERMES_HOME"]
++    t = _terminal_policy(home)
++    extra = json.loads(t.get("TERMINAL_DOCKER_EXTRA_ARGS") or "[]")
++    env = json.loads(t.get("TERMINAL_DOCKER_ENV") or "{}")
++    assert t["TERMINAL_ENV"] == "docker", "email/cron have terminal but it runs on the host"
++    assert json.loads(t.get("TERMINAL_DOCKER_VOLUMES") or "[]") == [], "host paths are mounted into the sandbox"
++    assert t.get("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "").lower() != "true"
++    assert json.loads(t.get("TERMINAL_DOCKER_FORWARD_ENV") or "[]") == [], "host env (secrets) forwarded"
++    assert not {k for k in env if any(w in k.upper() for w in ("KEY", "TOKEN", "SECRET", "PASS"))}
++    assert "--read-only" in extra
++    assert extra[extra.index("--network") + 1] == SANDBOX_NETWORK, "sandbox not on the internal network"
++    assert not any(a.startswith(("--privileged", "--cap-add", "-v", "--volume", "--mount", "--pid", "--ipc"))
++                   for a in extra), extra
++    assert not any("docker.sock" in a for a in extra)
++    assert t.get("TERMINAL_CONTAINER_PERSISTENT", "").lower() == "false", "sandbox shared across sessions"
++    assert not _docker_has_host_access({"env_type": "docker", "docker_volumes": [],
++                                        "docker_mount_cwd_to_workspace": False})
++    names = set().union(*(_catalog(deployed_config, p) for p in JAILED_PLATFORMS))
++    assert {"drive_to_sandbox", "sandbox_to_drive"} <= names, "sandbox has terminal but no drive bridge"
++    approvals = deployed_config.get("approvals") or {}
++    assert str(approvals.get("mode", "smart")).lower() != "off"
++    # Non-strict media delivery emails ANY non-denylisted host file named in a MEDIA: line (a
++    # prompt-injected attachment could mail ~/Documents/... to the sender). Strict limits it to the
++    # profile caches, where sandbox_to_drive stages deliberate exports.
++    gw = deployed_config.get("gateway") or {}
++    assert gw.get("strict") is True, "gateway.strict must be true: MEDIA can attach arbitrary host files"
++    assert not gw.get("trust_recent_files"), "trust_recent_files re-opens host files written moments ago"
++    assert not gw.get("media_delivery_allow_dirs"), f"extra MEDIA roots: {gw.get('media_delivery_allow_dirs')}"
++
++
++def test_cron_job_cannot_widen_its_toolsets(deployed_config):
++    from cron.scheduler import _resolve_cron_enabled_toolsets
++
++    asked = ["file", "code_execution", "delegation", "computer_use", "browser", "terminal"]
++    got = set(_resolve_cron_enabled_toolsets({"id": "probe", "enabled_toolsets": asked}, deployed_config))
++    from hermes_cli.tools_config import _get_platform_tools
++    assert got <= _get_platform_tools(deployed_config, "cron"), "patch 0002 (cron clamp) is not applied"

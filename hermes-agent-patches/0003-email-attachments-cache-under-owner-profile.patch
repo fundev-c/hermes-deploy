@@ -1,0 +1,84 @@
+diff --git a/plugins/platforms/email/adapter.py b/plugins/platforms/email/adapter.py
+index 3a1b481438..478ac93c60 100644
+--- a/plugins/platforms/email/adapter.py
++++ b/plugins/platforms/email/adapter.py
+@@ -510,7 +510,7 @@ class EmailAdapter(BasePlatformAdapter):
+ 
+     async def _check_inbox(self) -> None:
+         """Check INBOX for unseen messages and dispatch them."""
+-        messages = await asyncio.get_running_loop().run_in_executor(None, self._fetch_new_messages)
++        messages = await asyncio.get_running_loop().run_in_executor(None, self._fetch_in_owner_home)
+         # Dispatch partial results BEFORE escalating a failure — a mid-batch exception returns what was fetched (already marked seen).
+         for msg_data in messages:
+             await self._dispatch_message(msg_data)
+@@ -523,6 +523,22 @@ class EmailAdapter(BasePlatformAdapter):
+             self._set_fatal_error("email_imap_fetch_failed", self._last_fetch_error or "IMAP fetch failed", retryable=True)
+             await self._notify_fatal_error()
+ 
++    def _fetch_in_owner_home(self) -> List[Dict[str, Any]]:
++        """hermes-deploy: fetch with HERMES_HOME bound to the profile that owns this adapter.
++        A multiplexed gateway polls outside any profile scope, so attachments were cached under the
++        default profile, where the owner's tools (drive jail, sandbox mounts) could not see them.
++        Set in the executor thread itself: run_in_executor does not carry contextvars over."""
++        owner = getattr(self, "_owner_profile", None)
++        if not owner:
++            return self._fetch_new_messages()
++        from hermes_cli.profiles import get_profile_dir
++        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
++        token = set_hermes_home_override(str(get_profile_dir(owner)))
++        try:
++            return self._fetch_new_messages()
++        finally:
++            reset_hermes_home_override(token)
++
+     def _fetch_new_messages(self) -> List[Dict[str, Any]]:
+         """Fetch new (unseen) messages from IMAP. Runs in executor thread."""
+         results = []
+diff --git a/tests/gateway/test_email_attachments_land_in_owner_profile.py b/tests/gateway/test_email_attachments_land_in_owner_profile.py
+new file mode 100644
+index 0000000000..821ca15edd
+--- /dev/null
++++ b/tests/gateway/test_email_attachments_land_in_owner_profile.py
+@@ -0,0 +1,42 @@
++"""hermes-deploy: a multiplexed gateway polls email outside any profile scope, so a named
++profile's attachments were cached under the DEFAULT profile, out of reach of that profile's
++drive jail and sandbox mounts. The fetch must run with HERMES_HOME bound to the owner."""
++import os
++from unittest.mock import patch
++
++from gateway.config import PlatformConfig
++
++
++def _adapter():
++    env = {"EMAIL_ADDRESS": "a@x", "EMAIL_PASSWORD": "p", "EMAIL_IMAP_HOST": "i", "EMAIL_SMTP_HOST": "s"}
++    with patch.dict(os.environ, env):
++        from plugins.platforms.email.adapter import EmailAdapter
++        return EmailAdapter(PlatformConfig(enabled=True))
++
++
++def test_fetch_caches_under_the_owning_profile(tmp_path, monkeypatch):
++    from hermes_constants import get_hermes_home
++    team = tmp_path / "profiles" / "team"
++    team.mkdir(parents=True)
++    a = _adapter()
++    a.set_owner_profile("team")
++    seen = {}
++
++    def fake_fetch():
++        from gateway.platforms.base import get_document_cache_dir
++        seen["home"], seen["cache"] = get_hermes_home(), get_document_cache_dir()
++        return []
++    monkeypatch.setattr(a, "_fetch_new_messages", fake_fetch)
++    with patch("hermes_cli.profiles.get_profile_dir", lambda name: team):
++        a._fetch_in_owner_home()
++    assert seen["home"] == team
++    assert team in seen["cache"].parents
++    assert get_hermes_home() != team  # override is reset afterwards
++
++
++def test_default_profile_adapter_is_unchanged(monkeypatch):
++    from hermes_constants import get_hermes_home
++    a = _adapter()
++    before = get_hermes_home()
++    monkeypatch.setattr(a, "_fetch_new_messages", lambda: [get_hermes_home()])
++    assert a._fetch_in_owner_home() == [before]

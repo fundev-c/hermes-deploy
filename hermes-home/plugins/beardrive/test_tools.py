@@ -413,3 +413,114 @@ def test_status_counts_conflicts_and_never_surfaces_mount_identity(mount, monkey
     s = _status_with(monkeypatch, None, "")
     assert s["files"] == 3 and s["conflict_copies"] == 1
     assert "secret-id" not in json.dumps(s)
+
+
+# --------------------------------------------------------------------------- drive <-> sandbox bridge
+
+class FakeSandbox:
+    """Stands in for the Docker env: /workspace is a host temp dir; anything else is 'the container'."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        (root / "workspace").mkdir(parents=True)
+        (root / "etc").mkdir()
+        (root / "etc" / "passwd").write_text("root:x:0:0")
+
+    def _host(self, p: str) -> Path:
+        return self.root / p.lstrip("/")
+
+    def execute(self, command, cwd="", stdin_data=None, **_):
+        import base64
+        import shlex
+        dest = shlex.split(command.split("base64 -d >", 1)[1])[0]
+        self._host(dest).parent.mkdir(parents=True, exist_ok=True)
+        self._host(dest).write_bytes(base64.b64decode(stdin_data))
+        return {"returncode": 0, "output": ""}
+
+    def fetch_realpath(self, p):
+        real = Path(os.path.realpath(self._host(p)))
+        try:
+            return "/" + str(real.relative_to(self.root.resolve()))
+        except ValueError:
+            return str(real)  # escaped the fake container entirely
+
+    def fetch_file(self, remote, local, *, max_bytes):
+        data = self._host(remote).read_bytes()
+        if len(data) > max_bytes:
+            raise RuntimeError("exceeds the delivery limit")
+        Path(local).write_bytes(data)
+
+
+@pytest.fixture
+def box(tmp_path, monkeypatch):
+    b = FakeSandbox(tmp_path / "container")
+    monkeypatch.setattr(tools, "_sandbox_env", lambda task_id: b)
+    return b
+
+
+def test_drive_to_sandbox_copies_bytes_exactly(mount, box):
+    blob = bytes(range(256)) * 50
+    (mount / "book.xlsx").write_bytes(blob)
+    d = ok(tools.drive_to_sandbox({"path": "book.xlsx"}, **CALL))
+    assert d["sandbox_path"] == "/workspace/drive/book.xlsx"
+    assert (box.root / "workspace" / "drive" / "book.xlsx").read_bytes() == blob
+
+
+@pytest.mark.parametrize("bad", ["../outside.txt", "/etc/passwd", ".bdrive/config.json", "missing.csv"])
+def test_drive_to_sandbox_stays_in_the_jail(mount, box, bad, tmp_path):
+    (tmp_path / "outside.txt").write_text("host secret")
+    refused(tools.drive_to_sandbox({"path": bad}, **CALL))
+    assert not (box.root / "workspace" / "drive").exists()
+
+
+def test_drive_to_sandbox_size_cap(mount, box, monkeypatch):
+    monkeypatch.setattr(tools, "MAX_BRIDGE_BYTES", 10)
+    assert "limit" in refused(tools.drive_to_sandbox({"path": "sales.csv"}, **CALL))
+
+
+def test_sandbox_to_drive_saves_and_never_overwrites(mount, box, as_sender):
+    as_sender("alice@example.com")
+    (box.root / "workspace" / "result.csv").write_text("n\n25544\n")
+    assert ok(tools.sandbox_to_drive({"source": "/workspace/result.csv"}, **CALL))["saved"] == "result.csv"
+    assert (mount / "result.csv").read_text() == "n\n25544\n"
+    (box.root / "workspace" / "result.csv").write_text("changed")
+    assert "already exists" in refused(tools.sandbox_to_drive({"source": "result.csv"}, **CALL))
+    assert (mount / "result.csv").read_text() == "n\n25544\n"
+    assert ok(tools.sandbox_to_drive({"source": "result.csv", "on_exists": "rename"}, **CALL))["saved"] == "result (2).csv"
+
+
+def test_sandbox_to_drive_refuses_sources_outside_workspace(mount, box, as_sender):
+    as_sender("alice@example.com")
+    (box.root / "workspace" / "link").symlink_to(box.root / "etc" / "passwd")
+    for src in ("/etc/passwd", "/workspace/link", "/workspace/../etc/passwd", "/workspace"):
+        assert "/workspace" in refused(tools.sandbox_to_drive({"source": src}, **CALL))
+    assert {p.name for p in mount.iterdir()} == {".bdrive", "notes.md", "sales.csv"}
+
+
+def test_sandbox_to_drive_name_cannot_escape_or_hit_reserved(mount, box, as_sender):
+    as_sender("alice@example.com")
+    (box.root / "workspace" / "r.txt").write_text("x")
+    assert ok(tools.sandbox_to_drive({"source": "r.txt", "name": "../../evil.txt"}, **CALL))["saved"] == "evil.txt"
+    refused(tools.sandbox_to_drive({"source": "r.txt", "name": ".bdrive"}, **CALL))
+
+
+def test_sandbox_to_drive_requires_identity(mount, box):
+    (box.root / "workspace" / "r.txt").write_text("x")
+    assert "identity" in refused(tools.sandbox_to_drive({"source": "r.txt"}, **CALL))
+
+
+def test_bridge_is_disabled_unless_the_terminal_is_the_docker_sandbox(mount, monkeypatch):
+    import tools.terminal_scope as ts
+    monkeypatch.setattr(ts, "terminal_env", lambda key: "local")
+    assert "not the docker sandbox" in refused(tools.drive_to_sandbox({"path": "sales.csv"}, **CALL))
+
+
+def test_sandbox_to_drive_stages_an_email_attachment_in_the_document_cache(mount, box, as_sender, home):
+    from gateway.platforms.base import get_document_cache_dir
+    as_sender("alice@example.com")
+    (box.root / "workspace" / "Result Book.xlsx").write_bytes(b"PK\x03\x04data")
+    d = ok(tools.sandbox_to_drive({"source": "/workspace/Result Book.xlsx"}, **CALL))
+    assert d["attach"].startswith("MEDIA:")
+    staged = Path(d["attach"][len("MEDIA:"):])
+    assert staged.parent == get_document_cache_dir() and staged.read_bytes() == b"PK\x03\x04data"
+    assert " " not in staged.name  # a MEDIA path must survive the reply parser

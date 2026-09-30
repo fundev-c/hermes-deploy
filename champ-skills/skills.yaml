@@ -1,0 +1,14 @@
+# Champ-Deep/champ-skills -> team profile (email/cron). Only these are synced.
+# description: <= 60 chars, trigger first. Upstream descriptions run 150+ chars and the skill index
+# truncates at 57, which drops exactly the "when to use" signal the agent routes on.
+# Skipped on purpose: meeting-followup (tied to one person's vault), pdf-explore (needs a hosted
+# PDF kernel), firecrawl / signal-scout / literature-review (need open web), google-workspace.
+repo: https://github.com/Champ-Deep/champ-skills.git
+branch: main
+skills:
+  documents/no-ai-slop: "Remove AI-sounding patterns from writing meant for people."
+  documents/executive-one-pager: "Condense notes, docs or decks into one decision page."
+  documents/doc-coauthoring: "Co-write structured docs, proposals or specs with the user."
+  marketing/internal-comms: "Write internal updates, status reports and newsletters."
+  marketing/asset-title: "Write buyer-focused titles for marketing or sales assets."
+  design/skills/visual-report-builder: "Build a polished single-file HTML report or brief."

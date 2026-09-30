@@ -1,0 +1,9 @@
+[Unit]
+Description=Sync selected Champ-Deep/champ-skills into the Hermes team profile
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python %h/Hermes_agent/hermes-deploy/champ-skills/sync.py
+MemoryMax=300M
+Nice=10

@@ -1,0 +1,20 @@
+[Unit]
+Description=n8n 2.39.8 for Hermes (separate from global n8n)
+After=network-online.target
+
+[Service]
+Environment=N8N_USER_FOLDER=%h/.n8n-hermes
+Environment=N8N_PORT=5688
+Environment=N8N_RUNNERS_BROKER_PORT=5689
+Environment=N8N_LISTEN_ADDRESS=127.0.0.1
+Environment=N8N_HOST=localhost
+Environment=N8N_EDITOR_BASE_URL=http://localhost:5688
+Environment=WEBHOOK_URL=http://127.0.0.1:5688/
+Environment=N8N_DIAGNOSTICS_ENABLED=false
+Environment=PATH=/home/hemang/.nvm/versions/node/v24.13.1/bin:/usr/bin:/bin
+ExecStart=/home/hemang/.nvm/versions/node/v24.13.1/bin/node %h/.local/share/n8n-hermes/node_modules/n8n/bin/n8n start
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

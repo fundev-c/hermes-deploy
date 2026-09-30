@@ -1,0 +1,16 @@
+name: learning
+label: Learning loop
+kind: standalone
+version: 1.0.0
+description: >
+  Grades email/cron tasks good or bad from the sender's reply (or 3 days of
+  silence = good), records why a bad task failed, and keeps a short list of
+  guarded lessons that are shown to the agent on later tasks. Skill changes
+  still go through the staged skill_manage gate.
+config_schema:
+  owner:
+    type: str
+    description: "Address that may grade any task and receives the daily lesson digest"
+  silence_days:
+    type: int
+    description: "Days without feedback after which a task counts as good (default 3)"

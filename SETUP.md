@@ -65,10 +65,29 @@ and adds two regression suites:
 cd $H\hermes-agent
 git apply --check "$R\hermes-agent-patches\0001-cron-deliver-not-model-settable-and-beardrive-tests.patch"
 git apply         "$R\hermes-agent-patches\0001-cron-deliver-not-model-settable-and-beardrive-tests.patch"
+git apply --check "$R\hermes-agent-patches\0002-cron-clamp-job-toolsets-to-platform-list.patch"
+git apply         "$R\hermes-agent-patches\0002-cron-clamp-job-toolsets-to-platform-list.patch"
+git apply         "$R\hermes-agent-patches\0003-email-attachments-cache-under-owner-profile.patch"
+git apply         "$R\hermes-agent-patches\0004-skills-validate-before-staging.patch"
+git apply         "$R\hermes-agent-patches\0005-pre-verify-on-platforms.patch"
 ```
 
-**Check:** `git status --short` shows `tools/cronjob_tools.py` modified and the two
-new test files. A later `hermes update` can conflict with the patch. If it does,
+Patch 0003 makes a multiplexed gateway cache a named profile's email attachments under that
+profile (they landed in the default profile, out of reach of its drive jail and sandbox).
+Patch 0004 validates a learned skill (60-char description, name, size) *before* staging it, so
+the agent gets the rejection in-turn and retries, instead of `/skills approve` failing later.
+Patch 0005 lets `agent.pre_verify_platforms` (team: email, cron) run the `pre_verify` hook on every
+turn, not only after host file edits, and passes it the turn's messages. The learning plugin's task
+verifier (rules plus a second free model as judge) uses it to retry, then flag.
+For a pending skill staged before 0004, shorten it with
+`python plugins/learning/pending_skill_fix.py <id> "<description>"` in the team profile.
+
+Patch 0002 stops a cron job's own `enabled_toolsets` (which the model can set through
+the cronjob tool) from widening past `platform_toolsets.cron`. Without it, a job
+asking for `terminal` got a host shell even though cron's list excluded it.
+
+**Check:** `git status --short` shows `tools/cronjob_tools.py`, `cron/scheduler.py` and
+`tests/cron/test_scheduler.py` modified, and three new test files. A later `hermes update` can conflict with the patch. If it does,
 reapply it.
 
 The venv is built by **uv** and has **no pip**. Use `$H\bin\uv.exe pip install ...`

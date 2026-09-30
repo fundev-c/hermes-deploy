@@ -1,0 +1,12 @@
+[Unit]
+Description=BearDrive folder sync for ~/BearDrive (replaces the oneshot beardrive.service)
+After=bdrive-hub.service
+Wants=bdrive-hub.service
+
+[Service]
+ExecStart=%h/bin/bdrive daemon run %h/BearDrive --scan-interval 3s --remote-interval 10s
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
