@@ -70,6 +70,7 @@ git apply         "$R\hermes-agent-patches\0002-cron-clamp-job-toolsets-to-platf
 git apply         "$R\hermes-agent-patches\0003-email-attachments-cache-under-owner-profile.patch"
 git apply         "$R\hermes-agent-patches\0004-skills-validate-before-staging.patch"
 git apply         "$R\hermes-agent-patches\0005-pre-verify-on-platforms.patch"
+git apply         "$R\hermes-agent-patches\0006-containment-web-contract.patch"
 ```
 
 Patch 0003 makes a multiplexed gateway cache a named profile's email attachments under that
@@ -79,6 +80,9 @@ the agent gets the rejection in-turn and retries, instead of `/skills approve` f
 Patch 0005 lets `agent.pre_verify_platforms` (team: email, cron) run the `pre_verify` hook on every
 turn, not only after host file edits, and passes it the turn's messages. The learning plugin's task
 verifier (rules plus a second free model as judge) uses it to retry, then flag.
+Patch 0006 (test only) adds containment contract 6: `web` on email/cron only as Firecrawl cloud
+search plus extraction through the sandboxed self-hosted Firecrawl (`firecrawl/`, plugin
+`firecrawl_local`), with the learning plugin's web exfiltration guard active.
 For a pending skill staged before 0004, shorten it with
 `python plugins/learning/pending_skill_fix.py <id> "<description>"` in the team profile.
 

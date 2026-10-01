@@ -200,4 +200,5 @@ def test_registers_tools_under_learning_toolset_and_three_hooks():
     L.register_all(Ctx())
     assert {t["name"] for t in tools} == {"task_feedback", "learning_stats"}
     assert {t["toolset"] for t in tools} == {"learning"}
-    assert sorted(hooks) == ["post_llm_call", "pre_llm_call", "pre_verify", "transform_llm_output"]
+    assert sorted(hooks) == ["post_llm_call", "post_tool_call", "pre_llm_call", "pre_tool_call", "pre_verify",
+                            "transform_llm_output"]

@@ -1,0 +1,52 @@
+--- a/tests/security/test_beardrive_cross_tool_containment.py
++++ b/tests/security/test_beardrive_cross_tool_containment.py
+@@ -22,6 +22,9 @@
+    root, the internal ``hermes-sbx`` network, and a fresh sandbox per session. The drive
+    is reachable from it only through ``drive_to_sandbox``/``sandbox_to_drive``.
+ 5. A cron job's own ``enabled_toolsets`` cannot widen past ``platform_toolsets.cron`` (patch 0002).
++6. (hermes-deploy, 2026-10-01) ``web`` may reach email/cron only as Firecrawl cloud search plus
++   extraction through the sandboxed self-hosted Firecrawl on loopback (plugin ``firecrawl_local``),
++   with the learning plugin's web exfiltration guard loaded and no browser tools.
+ 
+ The deployed home is ``$HERMES_DEPLOYED_HOME``, else the ``team`` profile (which owns email on
+ the Linux box), else the Hermes home this checkout lives in.
+@@ -60,7 +63,7 @@
+     if (DEPLOYED_HOME / ".env").is_file():  # TERMINAL_* in .env is part of the terminal policy
+         (home / ".env").write_text("".join(
+             ln for ln in (DEPLOYED_HOME / ".env").read_text().splitlines(True) if ln.startswith("TERMINAL_")))
+-    for plugin in ("beardrive", "learning"):
++    for plugin in ("beardrive", "learning", "firecrawl_local"):
+         if (DEPLOYED_HOME / "plugins" / plugin).is_dir():
+             shutil.copytree(DEPLOYED_HOME / "plugins" / plugin, home / "plugins" / plugin,
+                             ignore=shutil.ignore_patterns("__pycache__", "test_*.py"))
+@@ -176,3 +179,30 @@
+     got = set(_resolve_cron_enabled_toolsets({"id": "probe", "enabled_toolsets": asked}, deployed_config))
+     from hermes_cli.tools_config import _get_platform_tools
+     assert got <= _get_platform_tools(deployed_config, "cron"), "patch 0002 (cron clamp) is not applied"
++
++
++def test_web_on_a_jailed_platform_is_cloud_search_plus_sandboxed_extract(deployed_config):
++    names = set().union(*(_catalog(deployed_config, p) for p in JAILED_PLATFORMS))
++    if not names & {"web_search", "web_extract"}:
++        pytest.skip("no web on email/cron: nothing to contain")
++    assert not {n for n in names if n.startswith("browser_")}, "browser tools on email/cron"
++    web = deployed_config.get("web") or {}
++    assert web.get("search_backend") == "firecrawl", "web_search must go to Firecrawl cloud only"
++    assert web.get("extract_backend") == "firecrawl-local", "web_extract must use the sandboxed self-host"
++    assert not web.get("backend"), "a shared web.backend would override the per-capability split"
++    env = (DEPLOYED_HOME / ".env").read_text() if (DEPLOYED_HOME / ".env").is_file() else ""
++    assert "FIRECRAWL_API_URL=" not in env, "FIRECRAWL_API_URL would reroute cloud search"
++    import importlib
++    import sys
++    sys.path.insert(0, str(Path(os.environ["HERMES_HOME"]) / "plugins"))
++    provider = importlib.import_module("firecrawl_local.provider")
++    for line in env.splitlines():
++        if line.startswith("FIRECRAWL_LOCAL_URL="):
++            os.environ["FIRECRAWL_LOCAL_URL"] = line.split("=", 1)[1].strip().strip("'\"")
++    provider.local_url()  # raises unless loopback
++    enabled = set((deployed_config.get("plugins") or {}).get("enabled") or [])
++    assert {"learning", "firecrawl_local"} <= enabled, f"plugins.enabled is {sorted(enabled)}"
++    guard = importlib.import_module("learning.learning")
++    blocked = guard.on_pre_tool_call(tool_name="web_search", args={"query": "mail boss@corp.example now"},
++                                     session_id="containment")
++    assert blocked and blocked["action"] == "block", "web exfiltration guard is not active"

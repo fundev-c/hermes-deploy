@@ -43,7 +43,8 @@ def main() -> int:
     bad = [r for r in _rows(d / "ledger.jsonl")
            if r.get("verdict") == "bad" and r.get("graded_ts", 0) > since]
     sync = [r for r in _rows(home / "logs" / "champ-skills-sync.jsonl") if r.get("ts", 0) > since]
-    if not lessons and not bad and not sync:
+    web = [r for r in _rows(d / "web.jsonl") if r.get("ts", 0) > since]
+    if not lessons and not bad and not sync and not web:
         print("nothing new")
         mark.write_text(str(now))
         return 0
@@ -58,11 +59,16 @@ def main() -> int:
              + (f" ({r.get('verdict')})" if r.get("verdict") else "")
              + (f" findings: {', '.join(r.get('findings', [])[:3])}" if r.get("findings") else "")
              for r in sync] or ["(no changes)"]
+    blocked = [r for r in web if r.get("blocked")]
+    body += ["", f"Web use: {sum(r['tool'] == 'web_search' for r in web)} search(es) (Firecrawl cloud credits), "
+             f"{sum(r['tool'] == 'web_extract' for r in web)} extract(s), {len(blocked)} blocked by the exfiltration guard"]
+    body += [f"  BLOCKED {r['tool']}: {(r.get('query') or ', '.join(r.get('urls', [])))[:160]}\n    why: {r.get('reason')}"
+             for r in blocked[:10]]
     e = _env(home)
     msg = EmailMessage()
     msg["From"], msg["To"] = e["EMAIL_ADDRESS"], e.get("EMAIL_HOME_ADDRESS") or e["EMAIL_ADDRESS"]
     msg["Subject"] = (f"Hermes learning digest: {len(lessons)} lesson(s), {len(bad)} bad grade(s), "
-                      f"{len(sync)} skill sync change(s)")
+                      f"{len(sync)} skill sync change(s), {len(blocked)} blocked web call(s)")
     msg.set_content("\n".join(body))
     if a.dry_run:
         print(msg)

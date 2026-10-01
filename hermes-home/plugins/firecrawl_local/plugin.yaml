@@ -1,0 +1,9 @@
+name: firecrawl_local
+label: Firecrawl (sandboxed self-host)
+kind: backend
+version: 1.0.0
+description: >
+  web_extract through the sandboxed self-hosted Firecrawl on 127.0.0.1:3002
+  (hermes-deploy/firecrawl). Search stays on Firecrawl cloud (web.search_backend: firecrawl).
+provides_web_providers:
+  - firecrawl-local

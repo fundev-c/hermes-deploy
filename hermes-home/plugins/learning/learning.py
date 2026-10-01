@@ -25,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import webguard
+
 logger = logging.getLogger(__name__)
 
 PLATFORMS = ("email", "cron")
@@ -372,6 +374,33 @@ _TOOLS = {
 }
 
 
+def on_post_tool_call(tool_name: str = "", result: Any = None, session_id: str = "", **_: Any) -> None:
+    """Remember what non-web tools returned, so the web guard can spot it leaving in a query/URL."""
+    try:
+        webguard.remember(session_id, tool_name, result)
+    except Exception:  # an observer must never break a tool call
+        logger.debug("webguard remember failed", exc_info=True)
+
+
+def on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
+                     task_id: str = "", **_: Any) -> Optional[dict]:
+    """Block web_search / web_extract calls that would carry private data off the machine; log every one."""
+    if tool_name not in webguard.WEB_TOOLS:
+        return None
+    args = args if isinstance(args, dict) else {}
+    try:
+        reason = webguard.problem(session_id, tool_name, args)
+    except Exception:  # fail closed: an unexplained guard error blocks the call
+        logger.warning("webguard check failed", exc_info=True)
+        reason = "the guard could not check this call"
+    from gateway.session_context import get_session_env
+    _append("web.jsonl", {"ts": time.time(), "session": session_id, "platform": get_session_env("HERMES_SESSION_PLATFORM", ""),
+                          "tool": tool_name, "query": str(args.get("query", ""))[:300],
+                          "urls": [str(u)[:300] for u in (args.get("urls") or [])][:10],
+                          "blocked": bool(reason), "reason": reason or ""})
+    return {"action": "block", "message": webguard.block_message(reason)} if reason else None
+
+
 def register_all(ctx) -> None:
     global _ctx
     _ctx = ctx
@@ -386,3 +415,5 @@ def register_all(ctx) -> None:
     ctx.register_hook("transform_llm_output", on_transform_llm_output)
     ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("pre_verify", on_pre_verify)
+    ctx.register_hook("post_tool_call", on_post_tool_call)
+    ctx.register_hook("pre_tool_call", on_pre_tool_call)

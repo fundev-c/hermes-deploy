@@ -1,0 +1,146 @@
+# Self-hosted Firecrawl, sandboxed (see README.md). Upstream compose, cut down and locked:
+# - every service is on the --internal network fc-int: no route out, no host ports
+# - the only way out is fc-egress (squid: public sites yes, host/LAN/metadata no)
+# - the API is published on 127.0.0.1:3002 only, through a socat relay (internal networks
+#   cannot publish ports), so the hermes-sbx sandbox cannot reach it via the Docker gateway
+# - images pinned by digest, caps dropped, no host volumes, memory capped (~2.3 GB total)
+name: firecrawl
+
+x-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: {max-size: "5m", max-file: "2"}
+
+x-proxy: &proxy
+  PROXY_SERVER: http://fc-egress:3128
+  HTTP_PROXY: http://fc-egress:3128
+  HTTPS_PROXY: http://fc-egress:3128
+  NO_PROXY: redis,rabbitmq,nuq-postgres,playwright-service,api,localhost,127.0.0.1
+
+services:
+  fc-egress:
+    <<: *hardening
+    image: ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
+    cap_add: [SETUID, SETGID]
+    read_only: true
+    tmpfs: ["/var/spool/squid", "/var/run", "/var/log/squid:uid=13,gid=13"]
+    volumes: ["./squid.conf:/etc/squid/squid.conf:ro"]
+    networks: [fc-int, fc-out]
+    mem_limit: 96m
+    pids_limit: 64
+
+  api-relay:
+    <<: *hardening
+    image: alpine/socat@sha256:5ffbd6ae916cbad86a58fabe0d6d5a6fd5c2b47ddf031e82996baac9300e732f
+    command: ["TCP-LISTEN:3002,fork,reuseaddr", "TCP:api:3002"]
+    read_only: true
+    user: "65534:65534"
+    networks: [fc-int, fc-pub]
+    ports: ["127.0.0.1:3002:3002"]
+    mem_limit: 32m
+    pids_limit: 64
+
+  playwright-service:
+    <<: *hardening
+    image: ghcr.io/firecrawl/playwright-service@sha256:47da52c036b55580d5d0812fa530eacfe03533ebad9449a50858ff697db04f71
+    environment:
+      <<: *proxy
+      PORT: 3000
+      BLOCK_MEDIA: "true"
+      MAX_CONCURRENT_PAGES: 2
+    tmpfs: ["/tmp/.cache:noexec,nosuid,size=512m", "/tmp:size=256m"]
+    networks: [fc-int]
+    cpus: 2.0
+    mem_limit: 1100m
+    memswap_limit: 1100m
+
+  api:
+    <<: *hardening
+    image: ghcr.io/firecrawl/firecrawl@sha256:02dc6b78deade0aa8b7ff5b187eb76d77e6791f25d6c0695ef3d673a1259fb30
+    command: ["node", "dist/src/harness.js", "--start-docker"]
+    environment:
+      <<: *proxy
+      HOST: 0.0.0.0
+      PORT: 3002
+      ENV: local
+      USE_DB_AUTHENTICATION: "false"
+      REDIS_URL: redis://redis:6379
+      REDIS_RATE_LIMIT_URL: redis://redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://playwright-service:3000/scrape
+      NUQ_RABBITMQ_URL: amqp://rabbitmq:5672
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${FC_POSTGRES_PASSWORD:?run up.sh}
+      POSTGRES_DB: postgres
+      POSTGRES_HOST: nuq-postgres
+      POSTGRES_PORT: 5432
+      BULL_AUTH_KEY: ${FC_BULL_AUTH_KEY:?run up.sh}
+      NUM_WORKERS_PER_QUEUE: 2
+      CRAWL_CONCURRENT_REQUESTS: 2
+      MAX_CONCURRENT_JOBS: 2
+      BROWSER_POOL_SIZE: 2
+      HARNESS_STARTUP_TIMEOUT_MS: 120000
+      LOGGING_LEVEL: info
+    ulimits: {nofile: {soft: 65535, hard: 65535}}
+    tmpfs: ["/tmp:size=256m"]
+    depends_on:
+      redis: {condition: service_started}
+      playwright-service: {condition: service_started}
+      rabbitmq: {condition: service_healthy}
+      nuq-postgres: {condition: service_healthy}
+    networks: [fc-int]
+    cpus: 2.0
+    mem_limit: 900m
+    memswap_limit: 900m
+
+  redis:
+    <<: *hardening
+    image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "48mb"]
+    cap_add: [SETUID, SETGID]
+    read_only: true
+    tmpfs: ["/data"]
+    networks: [fc-int]
+    mem_limit: 64m
+
+  rabbitmq:
+    <<: *hardening
+    image: rabbitmq@sha256:d7af1c87c5f1eda13fcfca06db452bf3aeab6619fc3358b68535c0c02c4e52bc
+    cap_add: [SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER]
+    environment:
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "+MHas ageffcbf +MBas ageffcbf"
+    tmpfs: ["/var/lib/rabbitmq"]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [fc-int]
+    mem_limit: 192m
+
+  nuq-postgres:
+    <<: *hardening
+    image: ghcr.io/firecrawl/nuq-postgres@sha256:9b638af78d99873bc0ba2b57c9cbcd01df6ce96efeaa72d36cfbe0f76521e8fc
+    cap_add: [SETUID, SETGID, CHOWN, DAC_OVERRIDE, FOWNER]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${FC_POSTGRES_PASSWORD:?run up.sh}
+      POSTGRES_DB: postgres
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=40"]
+    tmpfs: ["/var/lib/postgresql/data", "/var/run/postgresql"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [fc-int]
+    mem_limit: 160m
+
+networks:
+  fc-int: {internal: true}
+  fc-out: {}
+  fc-pub: {}
