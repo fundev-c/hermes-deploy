@@ -63,9 +63,6 @@ fallback_providers:
   provider: nous
 - model: meituan/longcat-2.0:free
   provider: nous
-- base_url: http://127.0.0.1:8080/v1
-  model: Qwen3-1.7B
-  provider: custom
 group_sessions_per_user: true
 hooks:
   post_tool_call:
