@@ -54,6 +54,13 @@ display:
   skin: default
   streaming: true
   tool_progress: all
+  platforms:
+    email:
+      tool_progress: 'off'
+      interim_assistant_messages: false
+      long_running_notifications: false
+      busy_ack_detail: false
+      streaming: false
 fallback_providers:
 - model: meituan/longcat-2.5-preview:free
   provider: nous
@@ -537,6 +544,7 @@ platforms:
     - no-email-admins@admin.invalid
     user_allowed_commands:
     - new
+    batch_seconds: 90
 gateway:
   strict: true
   trust_recent_files: false

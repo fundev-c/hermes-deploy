@@ -9,6 +9,6 @@ Live copies from the Linux box as of 2026-09-30. `SETUP.md` is still written for
   Install them with `systemctl --user daemon-reload && systemctl --user enable --now <unit>`.
 - `sync_allowlist.py`: pushes `EMAIL_ALLOWED_USERS` from the team `.env` into the n8n send guard.
 
-Hermes core patches 0001–0006 are in `../hermes-agent-patches/`. The plugins are in
+Hermes core patches 0001–0007 are in `../hermes-agent-patches/`. The plugins are in
 `../hermes-home/plugins/` (beardrive, learning, firecrawl_local). Sandboxed self-hosted Firecrawl is in
 `../firecrawl/`. Champ skills sync is in `../champ-skills/`.

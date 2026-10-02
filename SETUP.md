@@ -71,6 +71,7 @@ git apply         "$R\hermes-agent-patches\0003-email-attachments-cache-under-ow
 git apply         "$R\hermes-agent-patches\0004-skills-validate-before-staging.patch"
 git apply         "$R\hermes-agent-patches\0005-pre-verify-on-platforms.patch"
 git apply         "$R\hermes-agent-patches\0006-containment-web-contract.patch"
+git apply         "$R\hermes-agent-patches\0007-email-outbox-batching.patch"
 ```
 
 Patch 0003 makes a multiplexed gateway cache a named profile's email attachments under that
@@ -83,6 +84,11 @@ verifier (rules plus a second free model as judge) uses it to retry, then flag.
 Patch 0006 (test only) adds containment contract 6: `web` on email/cron only as Firecrawl cloud
 search plus extraction through the sandboxed self-hosted Firecrawl (`firecrawl/`, plugin
 `firecrawl_local`), with the learning plugin's web exfiltration guard active.
+Patch 0007 adds an email outbox: with `platforms.email.batch_seconds` (team: 90) the replies to one
+recipient are collected and sent as one email per window; an attachment carries whatever is staged.
+The team config also sets `display.platforms.email` to the quiet tier (no tool progress, interim
+messages or heartbeats): the global `display.*` keys otherwise override email's quiet default and
+every progress update became its own email.
 For a pending skill staged before 0004, shorten it with
 `python plugins/learning/pending_skill_fix.py <id> "<description>"` in the team profile.
 

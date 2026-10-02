@@ -1,0 +1,189 @@
+--- a/plugins/platforms/email/adapter.py
++++ b/plugins/platforms/email/adapter.py
+@@ -353,6 +353,14 @@
+         self._smtp_tls_verify = tls_verify("EMAIL_SMTP_TLS_VERIFY", "smtp_tls_verify")
+         self._poll_interval = _esecret_int("EMAIL_POLL_INTERVAL", 15)
+         self._skip_attachments = extra.get("skip_attachments", False)  # platforms.email.skip_attachments
++        # Outbox staging (hermes-deploy patch 0007): with batch_seconds > 0, text replies to a recipient are
++        # collected and mailed as ONE email per window instead of one email per gateway message.
++        try:
++            self._batch_seconds = float(extra.get("batch_seconds") or _get_secret("EMAIL_BATCH_SECONDS", "") or 0)
++        except ValueError:
++            self._batch_seconds = 0.0
++        self._outbox: Dict[str, List[Tuple[str, Optional[str]]]] = {}
++        self._outbox_tasks: Dict[str, asyncio.Task] = {}
+         # Require an authenticated From: domain (SPF/DKIM/DMARC) before trusting it for authorization
+         # (GHSA-rxqh-5572-8m77). Default ON; opt out via require_authenticated_sender: false / EMAIL_TRUST_FROM_HEADER=true.
+         if "require_authenticated_sender" in extra:
+@@ -495,6 +503,8 @@
+         self._running = False
+         await cancel_task(self._poll_task)
+         self._poll_task = None
++        for chat_id in list(getattr(self, "_outbox", {})):  # never drop staged replies on shutdown/reconnect
++            await self._flush_outbox(chat_id)
+         logger.info("[Email] Disconnected.")
+ 
+     async def _poll_loop(self) -> None:
+@@ -674,9 +684,44 @@
+             return SendResult(success=False, error=str(e))
+ 
+     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+-        """Send an email reply to the given address."""
++        """Send an email reply to the given address (staged into the outbox when batch_seconds > 0)."""
++        if getattr(self, "_batch_seconds", 0) > 0:
++            self._outbox.setdefault(chat_id, []).append((content or "", reply_to))
++            task = self._outbox_tasks.get(chat_id)
++            if task is None or task.done():
++                self._outbox_tasks[chat_id] = asyncio.get_running_loop().create_task(self._flush_after(chat_id))
++            return SendResult(success=True)
+         return await self._run_send(self._send_email, (chat_id, content, reply_to), "[Email] Send failed to %s: %s", chat_id)
+ 
++    def _take_outbox(self, chat_id: str) -> Tuple[str, Optional[str]]:
++        """Pop the staged texts for *chat_id*: (bodies joined in order, first reply-to id)."""
++        task = getattr(self, "_outbox_tasks", {}).pop(chat_id, None)
++        if task is not None and task is not asyncio.current_task() and not task.done():
++            task.cancel()
++        parts, reply_to = [], None
++        for text, rid in getattr(self, "_outbox", {}).pop(chat_id, []):
++            reply_to = reply_to or rid
++            text = text.strip()
++            if text and (not parts or parts[-1] != text):
++                parts.append(text)
++        return "\n\n".join(parts), reply_to
++
++    async def _flush_after(self, chat_id: str) -> None:
++        try:
++            await asyncio.sleep(self._batch_seconds)
++        except asyncio.CancelledError:
++            return
++        await self._flush_outbox(chat_id)
++
++    async def _flush_outbox(self, chat_id: str, _retry: bool = True) -> None:
++        body, reply_to = self._take_outbox(chat_id)
++        if not body:
++            return
++        result = await self._run_send(self._send_email, (chat_id, body, reply_to), "[Email] Staged send failed to %s: %s", chat_id)
++        if not result.success and _retry:  # one retry on the next window, ahead of anything newer
++            self._outbox.setdefault(chat_id, []).insert(0, (body, reply_to))
++            self._outbox_tasks[chat_id] = asyncio.get_running_loop().create_task(self._flush_after(chat_id))
++
+     def _message_id_domain(self) -> str:
+         """Domain for generated Message-IDs; ``localhost`` when EMAIL_ADDRESS lacks ``@``."""
+         return (self._address.rsplit("@", 1)[-1] if "@" in self._address else "") or "localhost"
+@@ -755,6 +800,9 @@
+                 logger.warning("[Email] Skipping missing image: %s", local_path)
+         if not local_paths and not body_parts:
+             return SendResult(success=False, error="no valid images in batch")
++        staged, _ = self._take_outbox(chat_id)
++        if staged:
++            body_parts.insert(0, staged)
+         try:
+             message_id = await asyncio.get_running_loop().run_in_executor(None, self._send_email_with_attachments, chat_id, "\n\n".join(body_parts), local_paths)
+         except Exception as e:
+@@ -770,8 +818,10 @@
+ 
+     async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
+                             file_name: Optional[str] = None, reply_to: Optional[str] = None, **kwargs) -> SendResult:
+-        """Send a file as an email attachment."""
+-        return await self._run_send(self._send_email_with_attachment, (chat_id, caption or "", file_path, file_name, reply_to),
++        """Send a file as an email attachment (with any staged text for this recipient in the body)."""
++        staged, staged_reply = self._take_outbox(chat_id)
++        body = "\n\n".join(p for p in (staged, (caption or "").strip()) if p)
++        return await self._run_send(self._send_email_with_attachment, (chat_id, body, file_path, file_name, reply_to or staged_reply),
+                                     "[Email] Send document failed: %s")
+ 
+     def _send_email_with_attachment(self, to_addr: str, body: str, file_path: str, file_name: Optional[str] = None,
+--- a/tests/gateway/test_email_outbox_batching.py
++++ b/tests/gateway/test_email_outbox_batching.py
+@@ -0,0 +1,91 @@
++"""Email outbox staging (hermes-deploy patch 0007): with platforms.email.batch_seconds > 0, the
++gateway's text messages to one recipient are mailed as one email per window, attachments carry
++whatever is staged, nothing is lost on disconnect, and batch_seconds 0 keeps one-email-per-send."""
++import asyncio
++from unittest.mock import MagicMock
++
++from plugins.platforms.email.adapter import EmailAdapter
++
++
++def make(batch: float) -> EmailAdapter:
++    a = object.__new__(EmailAdapter)
++    a._address, a._password, a._thread_context = "bot@example.com", "secret", {}
++    a._batch_seconds, a._outbox, a._outbox_tasks = batch, {}, {}
++    a._running, a._poll_task = False, None
++    a._send_email = MagicMock(return_value="<id@x>")
++    a._send_email_with_attachment = MagicMock(return_value="<id@x>")
++    return a
++
++
++def test_messages_in_one_window_become_one_email():
++    a = make(0.05)
++
++    async def go():
++        for t in ("Working on it…", "Read the sheet: 25,544 rows.", "Done. Task T-abc123"):
++            assert (await a.send("u@example.com", t, reply_to="<orig@x>")).success
++        a._send_email.assert_not_called()
++        await asyncio.sleep(0.15)
++    asyncio.run(go())
++    a._send_email.assert_called_once()
++    to, body, rid = a._send_email.call_args.args
++    assert to == "u@example.com" and rid == "<orig@x>"
++    assert body == "Working on it…\n\nRead the sheet: 25,544 rows.\n\nDone. Task T-abc123"
++
++
++def test_recipients_are_batched_separately_and_duplicates_collapse():
++    a = make(0.05)
++
++    async def go():
++        await a.send("a@example.com", "same")
++        await a.send("a@example.com", "same")
++        await a.send("b@example.com", "other")
++        await asyncio.sleep(0.15)
++    asyncio.run(go())
++    sent = {c.args[0]: c.args[1] for c in a._send_email.call_args_list}
++    assert sent == {"a@example.com": "same", "b@example.com": "other"}
++
++
++def test_attachment_carries_staged_text_in_the_same_email():
++    a = make(30)
++
++    async def go():
++        await a.send("u@example.com", "Here is the corrected sheet.", reply_to="<orig@x>")
++        r = await a.send_document("u@example.com", "/tmp/x.xlsx", caption="attach")
++        await asyncio.sleep(0)
++        return r
++    assert asyncio.run(go()).success
++    a._send_email.assert_not_called()
++    to, body, path, name, rid = a._send_email_with_attachment.call_args.args
++    assert body == "Here is the corrected sheet.\n\nattach" and rid == "<orig@x>"
++    assert not a._outbox and not a._outbox_tasks
++
++
++def test_disconnect_flushes_instead_of_dropping():
++    a = make(30)
++
++    async def go():
++        await a.send("u@example.com", "final answer")
++        await a.disconnect()
++    asyncio.run(go())
++    assert a._send_email.call_args.args[1] == "final answer"
++
++
++def test_failed_window_is_retried_once():
++    a = make(0.05)
++    a._send_email = MagicMock(side_effect=[OSError("smtp down"), "<id@x>"])
++
++    async def go():
++        await a.send("u@example.com", "hello")
++        await asyncio.sleep(0.25)
++    asyncio.run(go())
++    assert a._send_email.call_count == 2 and a._send_email.call_args.args[1] == "hello"
++
++
++def test_batching_off_sends_immediately():
++    a = make(0)
++
++    async def go():
++        await a.send("u@example.com", "one")
++        await a.send("u@example.com", "two")
++    asyncio.run(go())
++    assert [c.args[1] for c in a._send_email.call_args_list] == ["one", "two"]
