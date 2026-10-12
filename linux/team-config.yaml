@@ -215,6 +215,15 @@ mcp_servers:
     timeout: 120
     trust: full
     url: http://127.0.0.1:5688/mcp/hermes
+  hermes-calendar:
+    connect_timeout: 60
+    enabled: true
+    headers:
+      Authorization: Bearer ${N8N_MCP_TOKEN}
+    keepalive_interval: 60
+    timeout: 120
+    trust: full
+    url: http://127.0.0.1:5688/mcp/hermes-calendar
 memory:
   memory_char_limit: 2200
   memory_enabled: true

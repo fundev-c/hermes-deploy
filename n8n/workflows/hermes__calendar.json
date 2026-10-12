@@ -1,0 +1,271 @@
+{
+  "name": "hermes__calendar",
+  "nodes": [
+    {
+      "id": "fe2b4a42-8ac9-4af0-be44-e3fec25013ce",
+      "name": "MCP Server Trigger",
+      "webhookId": "3f024cbf-a84e-4e41-8889-ceade31d1188",
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "authentication": "bearerAuth",
+        "path": "hermes-calendar"
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "cL5jeWCfM2F1Vwlg",
+          "name": "Bearer Auth account"
+        }
+      }
+    },
+    {
+      "id": "886562ff-a4cf-4074-a9f1-078613e9528b",
+      "name": "calendar_list_events",
+      "type": "n8n-nodes-base.googleCalendarTool",
+      "typeVersion": 1.3,
+      "position": [
+        -400,
+        240
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "List events on the Google Calendar between two times, ordered by start time. Recurring events are expanded.",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "harshilchamp676@gmail.com"
+        },
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 50,
+        "timeMin": "={{ $fromAI('after', \"Return events ending after this time. ISO 8601 date-time with offset, e.g. 2026-10-13T15:00:00+05:30\", 'string') }}",
+        "timeMax": "={{ $fromAI('before', \"Return events starting before this time. ISO 8601 date-time with offset, e.g. 2026-10-13T15:00:00+05:30\", 'string') }}",
+        "options": {
+          "orderBy": "startTime",
+          "recurringEventHandling": "expand",
+          "timeZone": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Asia/Kolkata"
+          }
+        }
+      },
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "antzNW8lfGBkro2g",
+          "name": "Google Calendar (harshilchamp676)"
+        }
+      }
+    },
+    {
+      "id": "fd8962e1-078f-41f6-9c28-f81f108affce",
+      "name": "calendar_get_event",
+      "type": "n8n-nodes-base.googleCalendarTool",
+      "typeVersion": 1.3,
+      "position": [
+        -200,
+        240
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Get one event from the Google Calendar by its event ID.",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "harshilchamp676@gmail.com"
+        },
+        "operation": "get",
+        "eventId": "={{ $fromAI('eventId', \"The Google Calendar event ID\", 'string') }}",
+        "options": {
+          "timeZone": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Asia/Kolkata"
+          }
+        }
+      },
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "antzNW8lfGBkro2g",
+          "name": "Google Calendar (harshilchamp676)"
+        }
+      }
+    },
+    {
+      "id": "6f282385-b2f4-4a46-b97a-a02b59eab9f5",
+      "name": "calendar_check_availability",
+      "type": "n8n-nodes-base.googleCalendarTool",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        240
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Return the busy slots on the Google Calendar between two times. Use before proposing or booking a meeting.",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "harshilchamp676@gmail.com"
+        },
+        "resource": "calendar",
+        "operation": "availability",
+        "timeMin": "={{ $fromAI('from', \"Start of the window to check. ISO 8601 date-time with offset, e.g. 2026-10-13T15:00:00+05:30\", 'string') }}",
+        "timeMax": "={{ $fromAI('to', \"End of the window to check. ISO 8601 date-time with offset, e.g. 2026-10-13T15:00:00+05:30\", 'string') }}",
+        "options": {
+          "outputFormat": "bookedSlots",
+          "timezone": {
+            "__rl": true,
+            "mode": "id",
+            "value": "Asia/Kolkata"
+          }
+        }
+      },
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "antzNW8lfGBkro2g",
+          "name": "Google Calendar (harshilchamp676)"
+        }
+      }
+    },
+    {
+      "id": "2a8271f5-134e-45b4-a978-01f74449af2d",
+      "name": "calendar_create_event",
+      "type": "n8n-nodes-base.googleCalendarTool",
+      "typeVersion": 1.3,
+      "position": [
+        200,
+        240
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Create an event on the Google Calendar. No guests are invited and no notifications are sent.",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "harshilchamp676@gmail.com"
+        },
+        "operation": "create",
+        "start": "={{ $fromAI('start', \"Event start. ISO 8601 date-time with offset, e.g. 2026-10-13T15:00:00+05:30\", 'string') }}",
+        "end": "={{ $fromAI('end', \"Event end. ISO 8601 date-time with offset, e.g. 2026-10-13T15:00:00+05:30\", 'string') }}",
+        "useDefaultReminders": true,
+        "additionalFields": {
+          "summary": "={{ $fromAI('title', \"Event title\", 'string') }}",
+          "description": "={{ $fromAI('description', \"Event notes; empty string if none\", 'string') }}",
+          "location": "={{ $fromAI('location', \"Event location; empty string if none\", 'string') }}",
+          "sendUpdates": "none"
+        }
+      },
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "antzNW8lfGBkro2g",
+          "name": "Google Calendar (harshilchamp676)"
+        }
+      }
+    },
+    {
+      "id": "3c807198-a935-4e82-b01c-1461cd5da0a4",
+      "name": "calendar_update_event",
+      "type": "n8n-nodes-base.googleCalendarTool",
+      "typeVersion": 1.3,
+      "position": [
+        400,
+        240
+      ],
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Update an event on the Google Calendar. Pass an empty string for any field to leave it unchanged. No notifications are sent.",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "harshilchamp676@gmail.com"
+        },
+        "operation": "update",
+        "eventId": "={{ $fromAI('eventId', \"The Google Calendar event ID\", 'string') }}",
+        "useDefaultReminders": true,
+        "updateFields": {
+          "summary": "={{ $fromAI('title', \"New title, or empty string to keep\", 'string') }}",
+          "start": "={{ $fromAI('start', \"New start (ISO 8601 date-time with offset, e.g. 2026-10-13T15:00:00+05:30), or empty string to keep\", 'string') }}",
+          "end": "={{ $fromAI('end', \"New end (ISO 8601 date-time with offset, e.g. 2026-10-13T15:00:00+05:30), or empty string to keep\", 'string') }}",
+          "description": "={{ $fromAI('description', \"New notes, or empty string to keep\", 'string') }}",
+          "location": "={{ $fromAI('location', \"New location, or empty string to keep\", 'string') }}",
+          "sendUpdates": "none"
+        }
+      },
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "antzNW8lfGBkro2g",
+          "name": "Google Calendar (harshilchamp676)"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "calendar_list_events": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calendar_get_event": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calendar_check_availability": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calendar_create_event": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "calendar_update_event": {
+      "ai_tool": [
+        [
+          {
+            "node": "MCP Server Trigger",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": true
+  },
+  "pinData": {}
+}

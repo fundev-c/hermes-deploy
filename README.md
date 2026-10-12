@@ -13,7 +13,7 @@ files from a working install; nothing in this repo is a secret.
 |---|---|---|
 | `hermes-home/` | `config.yaml`, `.env.example`, `SOUL.md`, launchers, the `beardrive` plugin, the learned `sales-drive-workflow` skill | `%LOCALAPPDATA%\hermes\` |
 | `hermes-agent-patches/` | Our change to upstream `NousResearch/hermes-agent` @ `01382698`: cron `deliver` removed from the model schema, plus two regression suites | `git apply` inside `%LOCALAPPDATA%\hermes\hermes-agent` |
-| `n8n/` | The two published workflows (MCP server + `send_email` guard) and `sync_allowlist.py` | n8n import; script to `%LOCALAPPDATA%\hermes\n8n-workflows\` |
+| `n8n/` | The published workflows (MCP server + `send_email` guard, and the `hermes__calendar` Google Calendar MCP) and `sync_allowlist.py` | n8n import; script to `%LOCALAPPDATA%\hermes\n8n-workflows\` |
 | `beardrive-wsl/` | `wsl.conf`, `.wslconfig`, hub config template, systemd units, logon task | WSL2 Ubuntu 24.04 and `%USERPROFILE%` |
 
 **Deliberately not here:** `.env`, `auth.json`, `shared\nous_auth.json`, every
