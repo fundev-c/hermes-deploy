@@ -54,6 +54,10 @@ services:
       PORT: 3000
       BLOCK_MEDIA: "true"
       MAX_CONCURRENT_PAGES: 2
+      # Its own SSRF check resolves the target itself, and fc-int has no outside DNS, so every site
+      # looked "private" and was refused. fc-egress (the only way out) blocks private/local targets
+      # after resolving them, so that check is redundant here.
+      ALLOW_LOCAL_WEBHOOKS: "true"
     tmpfs: ["/tmp/.cache:noexec,nosuid,size=512m", "/tmp:size=256m"]
     networks: [fc-int]
     cpus: 2.0
@@ -84,8 +88,6 @@ services:
       # The harness starts NUQ_WORKER_COUNT (default 5) node workers next to api/worker/extract-worker;
       # at 5 the container is OOM-killed (137) within seconds of starting.
       NUQ_WORKER_COUNT: 1
-      # Six node processes share this container; cap each heap so one can't take the lot.
-      NODE_OPTIONS: --max-old-space-size=256
       CRAWL_CONCURRENT_REQUESTS: 2
       MAX_CONCURRENT_JOBS: 2
       BROWSER_POOL_SIZE: 2
@@ -100,8 +102,10 @@ services:
       nuq-postgres: {condition: service_healthy}
     networks: [fc-int]
     cpus: 2.0
-    mem_limit: 1400m
-    memswap_limit: 2400m  # startup peaks ~1.7 GB across six node processes; let the spike swap
+    # Measured 2026-10-27: ~1.9 GB resident once all six node processes are up (peak ~2.0 GB).
+    # Lower limits get it OOM-killed in a restart loop; don't cap node's heap either (exit 134).
+    mem_limit: 2200m
+    memswap_limit: 2200m
 
   redis:
     <<: *hardening

@@ -271,6 +271,7 @@ platform_toolsets:
   - terminal
   - cronjob
   - learning
+  - web
   google_chat:
   - hermes-google_chat
   homeassistant:
@@ -294,6 +295,7 @@ plugins:
   enabled:
   - beardrive
   - learning
+  - firecrawl_local
   entries:
     beardrive:
       allow_tool_override: false
@@ -558,3 +560,6 @@ platforms:
 gateway:
   strict: true
   trust_recent_files: false
+web:
+  extract_backend: firecrawl-local
+  search_backend: firecrawl

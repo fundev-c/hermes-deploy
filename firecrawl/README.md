@@ -19,7 +19,7 @@ plugins:
 | `fc-int` network | `internal`: no route out and no outside DNS. Every Firecrawl service sits here. |
 | `fc-egress` (squid, `squid.conf`) | The only way out. Allows any public http/https site, because scraping needs that. Denies loopback, RFC1918, CGNAT, link-local (including 169.254.169.254 metadata), ULA, and local names, whatever a name resolves to. |
 | `api-relay` (socat) | Publishes the API on **127.0.0.1:3002 only**. Internal networks can't publish ports, so this relay is the one container on `fc-pub`. Loopback binding keeps the API unreachable from the `hermes-sbx` sandbox through its gateway, 172.18.0.1. |
-| api, playwright-service, redis, rabbitmq, nuq-postgres | Upstream images, pinned by digest, `cap_drop: ALL`, `no-new-privileges`, tmpfs data, no host volumes. Memory is capped at about 2.4 GB in total. |
+| api, playwright-service, redis, rabbitmq, nuq-postgres | Upstream images, pinned by digest, `cap_drop: ALL`, `no-new-privileges`, tmpfs data, no host volumes. Memory is capped at about 3.7 GB in total; the api alone sits near 1.9 GB. |
 
 - No credentials are needed (`USE_DB_AUTHENTICATION=false`). The API is only reachable from this machine.
 - The internal Postgres password and the Bull key are generated once into `~/.config/firecrawl-local.env` (mode 0600). They are never committed.
