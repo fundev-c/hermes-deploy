@@ -144,3 +144,14 @@ def test_giving_up_on_an_attachment_is_verified_even_without_tools(monkeypatch):
     req = "[The user sent a document: 'a.xlsx'] Check whether the details are correct."
     v = V.verify(turn(req), "I can't open xlsx files here. Please convert it to CSV.")
     assert v is not None and v["verdict"] == "fail"
+
+
+def test_judges_come_from_free_models_file_and_skip_the_worker(tmp_path, monkeypatch):
+    f = tmp_path / "free_models.json"
+    f.write_text(json.dumps({"chain": ["big:free", "b:free"], "by_speed": ["fast:free", "big:free", "b:free"]}))
+    monkeypatch.setattr(V, "FREE_MODELS_FILE", f)
+    assert V._judge_models() == ("fast:free", "b:free")
+    f.write_text("not json")
+    assert V._judge_models() == V.JUDGE_MODELS
+    monkeypatch.setattr(V, "FREE_MODELS_FILE", tmp_path / "missing.json")
+    assert V._judge_models() == V.JUDGE_MODELS

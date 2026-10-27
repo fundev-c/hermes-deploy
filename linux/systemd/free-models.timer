@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 3 hours: re-check which free models Hermes should use
+
+[Timer]
+OnCalendar=00/3:20
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

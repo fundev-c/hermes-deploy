@@ -62,13 +62,13 @@ display:
       busy_ack_detail: false
       streaming: false
 fallback_providers:
-- model: meituan/longcat-2.5-preview:free
+- model: poolside/laguna-s-2.1:free
+  provider: nous
+- model: ornith/ornith-1.5-122b:free
   provider: nous
 - model: stepfun/step-3.7-flash:free
   provider: nous
-- model: upstage/solar-pro4:free
-  provider: nous
-- model: meituan/longcat-2.0:free
+- model: upstage/solar-mini4:free
   provider: nous
 group_sessions_per_user: true
 hooks:
@@ -232,7 +232,8 @@ memory:
   user_profile_enabled: true
 model:
   base_url: https://inference-api.nousresearch.com/v1
-  default: stealth/space-bunny-alpha
+  context_length: 262144
+  default: reflection/beam-1.0-501b-a23b:free
   provider: nous
 onboarding:
   seen:

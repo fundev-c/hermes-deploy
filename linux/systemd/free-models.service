@@ -1,0 +1,10 @@
+[Unit]
+Description=Probe free Nous models and keep the Hermes model chains on ones that work
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.hermes/hermes-agent
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python %h/Hermes_agent/hermes-deploy/models/free_models.py
+MemoryMax=200M
+Nice=10

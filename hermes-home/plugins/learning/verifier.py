@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import pathlib
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,7 +27,9 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
 # step-3.7-flash judged today's real task in ~25s; longcat-2.5-preview took 163s for the same input.
-JUDGE_MODELS = ("stepfun/step-3.7-flash:free", "meituan/longcat-2.5-preview:free")
+# Fallback only: free models churn, so the live pair comes from models/free_models.py (see _judge_models).
+JUDGE_MODELS = ("stepfun/step-3.7-flash:free", "upstage/solar-mini4:free")
+FREE_MODELS_FILE = pathlib.Path(os.environ.get("HERMES_FREE_MODELS_FILE", pathlib.Path.home() / ".hermes" / "free_models.json"))
 JUDGE_TIMEOUT = 45.0   # per request, as passed to the provider
 JUDGE_DEADLINE = 60.0  # wall clock for the whole judge step; provider timeouts are not always honoured
 _SKIP_TOOLS = {"task_feedback", "learning_stats", "skills_list", "skill_view"}
@@ -185,11 +189,23 @@ def judge(request: str, reply: str, events: List[Dict[str, Any]]) -> Optional[Di
     return box.get("v")
 
 
+def _judge_models() -> Tuple[str, ...]:
+    """The two fastest free models that passed free_models.py's last probe, skipping the worker (chain[0]) so
+    the judge stays a different model; JUDGE_MODELS when that file is missing or unreadable."""
+    try:
+        data = json.loads(FREE_MODELS_FILE.read_text())
+        worker = (data.get("chain") or [None])[0]
+        picks = tuple(m for m in data.get("by_speed") or [] if m != worker)[:2]
+        return picks or JUDGE_MODELS
+    except (OSError, ValueError, AttributeError):
+        return JUDGE_MODELS
+
+
 def _judge(request: str, reply: str, events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     from agent.auxiliary_client import call_llm
     msgs = [{"role": "system", "content": _JUDGE_SYSTEM},
             {"role": "user", "content": _judge_input(request, reply, events)}]
-    for model in JUDGE_MODELS:
+    for model in _judge_models():
         t = time.monotonic()
         try:
             resp = call_llm(task="task_verifier", provider="nous", model=model, messages=msgs,
