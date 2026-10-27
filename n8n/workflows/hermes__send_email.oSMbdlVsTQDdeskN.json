@@ -26,6 +26,10 @@
             {
               "name": "body",
               "type": "string"
+            },
+            {
+              "name": "attachments",
+              "type": "string"
             }
           ]
         }
@@ -43,7 +47,84 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// ── Recipient allowlist gate ───────────────────────────────────────────────\n// The MODEL supplies `to`. An attacker who gets a prompt injection into an\n// inbound email can therefore choose it. This node is the control that stops\n// that turning Hermes into an open relay: a recipient that is not on this list\n// aborts the workflow before the SMTP node ever runs.\n//\n// Keep this list in sync with EMAIL_ALLOWED_USERS in the Hermes .env.\nconst ALLOWED = [\n  'deep@lakeb2b.com',\n  'f20221771@hyderabad.bits-pilani.ac.in',\n  'harshilkhandelwal71@gmail.com',\n  'hemang.k@championsmail.com',\n  'uma.s@championsmail.com',\n];\n\nconst MAX_SUBJECT = 200;\nconst MAX_BODY = 20000;\n\nconst out = [];\nfor (const item of $input.all()) {\n  const to = String(item.json.to ?? '').trim().toLowerCase();\n\n  if (!to) {\n    throw new Error('send_email: \"to\" is required');\n  }\n  if (!ALLOWED.includes(to)) {\n    // Deliberately explicit: this shows up in the n8n execution log AND comes\n    // back to Hermes as a tool error, so a blocked attempt is visible.\n    throw new Error(`send_email: recipient not permitted: ${to}`);\n  }\n\n  const subject = String(item.json.subject ?? '(no subject)').slice(0, MAX_SUBJECT);\n  const body = String(item.json.body ?? '').slice(0, MAX_BODY);\n\n  out.push({ json: { to, subject, body } });\n}\nreturn out;"
+        "jsCode": "// ── Recipient allowlist gate ───────────────────────────────────────────────\n// The MODEL supplies `to`. An attacker who gets a prompt injection into an\n// inbound email can therefore choose it. This node is the control that stops\n// that turning Hermes into an open relay: a recipient that is not on this list\n// aborts the workflow before the SMTP node ever runs.\n//\n// Keep this list in sync with EMAIL_ALLOWED_USERS in the Hermes .env.\nconst ALLOWED = [\n  // Not committed (public repo): linux/sync_allowlist.py fills this from\n  // EMAIL_ALLOWED_USERS + EMAIL_CC_RECIPIENTS in the team .env.\n];\n\nconst MAX_SUBJECT = 200;\nconst MAX_BODY = 20000;\n\n// ── Attachment gate ──────────────────────────────────────────────────────────\n// The model also supplies `attachments`, so the same injection could ask for\n// ~/.hermes/.env. Only files Hermes itself staged for delivery are allowed:\n// sandbox_to_drive and inbound email both write to the team profile's\n// cache/documents. n8n enforces the same root again on the read\n// (N8N_RESTRICT_FILE_ACCESS_TO, realpath'd, so ../ and symlinks can't escape).\nconst ATTACH_ROOT = '/home/hemang/.hermes/profiles/team/cache/documents/';\nconst MAX_ATTACHMENTS = 10;\n// Gmail refuses these outright (552 5.7.0); fail here with a readable error instead.\nconst GMAIL_BLOCKED = /\\.(ade|adp|apk|appx|appxbundle|bat|cab|chm|cmd|com|cpl|dll|dmg|ex|ex_|exe|hta|ins|isp|iso|jar|js|jse|lib|lnk|mde|msc|msi|msix|msixbundle|msp|mst|nsh|pif|ps1|scr|sct|shb|sys|vb|vbe|vbs|vxd|wsc|wsf|wsh)$/i;\n\nfunction parseAttachments(raw) {\n  if (Array.isArray(raw)) return raw.map(String);\n  const s = String(raw ?? '').trim();\n  if (!s) return [];\n  if (s.startsWith('[')) {\n    try { return JSON.parse(s).map(String); } catch (e) { /* fall through */ }\n  }\n  // One path per line; a comma only separates when the next path starts right after it.\n  return s.split(/\\n|,\\s*(?=MEDIA:|\\/)/);\n}\n\nfunction checkAttachment(p) {\n  const path = p.trim().replace(/^MEDIA:\\s*/i, '');\n  if (!path.startsWith(ATTACH_ROOT) || path.includes('/../') || path.includes('/./') || /[*?{}!\\0]/.test(path)) {\n    throw new Error(`send_email: attachment not permitted: ${path} (only files under ${ATTACH_ROOT}, i.e. the MEDIA: path sandbox_to_drive returns)`);\n  }\n  if (GMAIL_BLOCKED.test(path)) {\n    throw new Error(`send_email: Gmail rejects this file type: ${path} (zip it or rename it, e.g. .txt)`);\n  }\n  return path;\n}\n\nconst out = [];\nfor (const item of $input.all()) {\n  const to = String(item.json.to ?? '').trim().toLowerCase();\n\n  if (!to) {\n    throw new Error('send_email: \"to\" is required');\n  }\n  if (!ALLOWED.includes(to)) {\n    // Deliberately explicit: this shows up in the n8n execution log AND comes\n    // back to Hermes as a tool error, so a blocked attempt is visible.\n    throw new Error(`send_email: recipient not permitted: ${to}`);\n  }\n\n  const subject = String(item.json.subject ?? '(no subject)').slice(0, MAX_SUBJECT);\n  const body = String(item.json.body ?? '').slice(0, MAX_BODY);\n  const attachments = [...new Set(parseAttachments(item.json.attachments).filter(p => p.trim()).map(checkAttachment))];\n  if (attachments.length > MAX_ATTACHMENTS) {\n    throw new Error(`send_email: at most ${MAX_ATTACHMENTS} attachments`);\n  }\n\n  out.push({ json: { to, subject, body, attachments } });\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "a4444444-4444-4444-8444-444444444444",
+      "name": "Has attachments?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.attachments.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a5555555-5555-4555-8555-555555555555",
+      "name": "One item per file",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        660,
+        -120
+      ],
+      "parameters": {
+        "fieldToSplitOut": "attachments",
+        "options": {}
+      }
+    },
+    {
+      "id": "a6666666-6666-4666-8666-666666666666",
+      "name": "Read Attachments",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        -120
+      ],
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "={{ $json.attachments }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "a7777777-7777-4777-8777-777777777777",
+      "name": "Bundle attachments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -120
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Read Attachments yields one item per file; the SMTP node wants one item\n// carrying every file. Gather them and drop the out_<hash>_ prefix Hermes\n// adds when it stages a file, so Uma sees \"report.xlsx\", not \"out_5f7a1dca_report.xlsx\".\nconst mail = $('Guard: recipient allowlist').first().json;\nconst binary = {};\nconst props = [];\n$input.all().forEach((item, i) => {\n  const b = item.binary.data;\n  b.fileName = String(b.fileName || `attachment_${i}`).replace(/^out_[0-9a-f]{8}_/, '');\n  binary[`file_${i}`] = b;\n  props.push(`file_${i}`);\n});\nreturn [{ json: { ...mail, fileAttachments: props.join(',') }, binary }];"
       }
     },
     {
@@ -53,7 +134,7 @@
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
       "position": [
-        440,
+        1320,
         0
       ],
       "parameters": {
@@ -62,11 +143,14 @@
         "subject": "={{ $json.subject }}",
         "emailFormat": "text",
         "text": "={{ $json.body }}",
-        "options": {}
+        "options": {
+          "appendAttribution": false,
+          "fileAttachments": "={{ $json.fileAttachments || '' }}"
+        }
       },
       "credentials": {
         "smtp": {
-          "id": "V8JJ2uOkELFUCGc3",
+          "id": "8oZjnEEJPrQdboBp",
           "name": "Hermes Gmail SMTP"
         }
       }
@@ -88,6 +172,57 @@
       "main": [
         [
           {
+            "node": "Has attachments?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has attachments?": {
+      "main": [
+        [
+          {
+            "node": "One item per file",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per file": {
+      "main": [
+        [
+          {
+            "node": "Read Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Attachments": {
+      "main": [
+        [
+          {
+            "node": "Bundle attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bundle attachments": {
+      "main": [
+        [
+          {
             "node": "Send Email",
             "type": "main",
             "index": 0
@@ -97,6 +232,7 @@
     }
   },
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "availableInMCP": true
   }
 }

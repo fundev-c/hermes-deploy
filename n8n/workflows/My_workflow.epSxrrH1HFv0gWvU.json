@@ -18,7 +18,7 @@
       },
       "credentials": {
         "httpBearerAuth": {
-          "id": "nuU56a1AzvwwdGMV",
+          "id": "cL5jeWCfM2F1Vwlg",
           "name": "Bearer Auth account"
         }
       }
@@ -47,7 +47,7 @@
         300
       ],
       "parameters": {
-        "description": "Send an email. Only pre-authorized recipients are permitted; anything else is rejected.",
+        "description": "Send an email, optionally with file attachments. Only pre-authorized recipients are permitted; anything else is rejected. To attach a file, first save it with sandbox_to_drive and pass the MEDIA: path it returns (one per line) in `attachments`. Sandbox paths like /workspace/... cannot be attached, and MEDIA: lines typed into `body` are NOT attachments.",
         "source": "database",
         "workflowId": {
           "__rl": true,
@@ -60,7 +60,8 @@
           "value": {
             "to": "={{ $fromAI('to', \"Recipient email address. Must be a pre-authorized address.\", 'string') }}",
             "subject": "={{ $fromAI('subject', \"Email subject line\", 'string') }}",
-            "body": "={{ $fromAI('body', \"Plain-text body of the email\", 'string') }}"
+            "body": "={{ $fromAI('body', \"Plain-text body of the email\", 'string') }}",
+            "attachments": "={{ $fromAI('attachments', \"Optional. Files to attach: the MEDIA:/home/hemang/.hermes/profiles/team/cache/documents/... paths returned by sandbox_to_drive, one per line. Leave empty for none.\", 'string', '') }}"
           },
           "matchingColumns": [],
           "schema": [
@@ -85,6 +86,15 @@
             {
               "id": "body",
               "displayName": "body",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "attachments",
+              "displayName": "attachments",
               "required": false,
               "defaultMatch": false,
               "display": true,

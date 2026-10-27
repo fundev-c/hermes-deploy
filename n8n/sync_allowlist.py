@@ -1,4 +1,4 @@
-"""Push EMAIL_ALLOWED_USERS into the n8n send_email guard.
+"""Push EMAIL_ALLOWED_USERS + EMAIL_CC_RECIPIENTS into the n8n send_email guard.
 
 The recipient allowlist has to exist in two places: Hermes decides who may
 *send* to the agent, n8n decides who may be *sent to*. Keeping two hand-edited
@@ -6,7 +6,7 @@ copies in sync is a losing game -- and the drift fails confusingly (a user is
 accepted on ingress, then send_email refuses to reply to them).
 
 So: ~/.hermes/.env is the single source of truth, and this script rewrites the
-n8n Code node from it. Run it after changing EMAIL_ALLOWED_USERS.
+n8n Code node from it. Run it after changing EMAIL_ALLOWED_USERS or EMAIL_CC_RECIPIENTS.
 
     python sync_allowlist.py [--check]
 
@@ -41,11 +41,15 @@ def call(method, path, key, body=None):
 def main() -> int:
     check_only = "--check" in sys.argv
     e = env()
-    wanted = sorted({a.strip().lower() for a in e["EMAIL_ALLOWED_USERS"].split(",") if a.strip()})
+    # send_email may mail anyone who may instruct the agent plus the receive-only Cc list (patch 0008).
+    wanted = sorted({a.strip().lower() for name in ("EMAIL_ALLOWED_USERS", "EMAIL_CC_RECIPIENTS")
+                     for a in e.get(name, "").split(",") if a.strip()})
     wf_id = WF_ID_FILE.read_text().strip()
     wf = call("GET", f"/workflows/{wf_id}", e["N8N_API_KEY"])
 
-    node = next(n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.code")
+    # The workflow has more than one Code node (Guard + Bundle attachments); pick the guard.
+    node = next(n for n in wf["nodes"]
+                if n["type"] == "n8n-nodes-base.code" and "const ALLOWED" in n["parameters"].get("jsCode", ""))
     code = node["parameters"]["jsCode"]
     current = sorted(re.findall(r"'([^']+@[^']+)'",
                                 re.search(r"const ALLOWED = \[(.*?)\];", code, re.S).group(1)))
