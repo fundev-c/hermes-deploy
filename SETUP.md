@@ -72,6 +72,7 @@ git apply         "$R\hermes-agent-patches\0004-skills-validate-before-staging.p
 git apply         "$R\hermes-agent-patches\0005-pre-verify-on-platforms.patch"
 git apply         "$R\hermes-agent-patches\0006-containment-web-contract.patch"
 git apply         "$R\hermes-agent-patches\0007-email-outbox-batching.patch"
+git apply         "$R\hermes-agent-patches\0008-email-reply-cc-approved-recipients.patch"
 ```
 
 Patch 0003 makes a multiplexed gateway cache a named profile's email attachments under that
@@ -86,6 +87,9 @@ search plus extraction through the sandboxed self-hosted Firecrawl (`firecrawl/`
 `firecrawl_local`), with the learning plugin's web exfiltration guard active.
 Patch 0007 adds an email outbox: with `platforms.email.batch_seconds` (team: 90) the replies to one
 recipient are collected and sent as one email per window; an attachment carries whatever is staged.
+Patch 0008 Cc's a reply to the inbound mail's other To/Cc recipients, but only those on
+`EMAIL_ALLOWED_USERS` or the receive-only `EMAIL_CC_RECIPIENTS` (team .env). Cc recipients get the reply;
+only `EMAIL_ALLOWED_USERS` can instruct the agent. Run `sync_allowlist.py` after changing either list.
 The team config also sets `display.platforms.email` to the quiet tier (no tool progress, interim
 messages or heartbeats): the global `display.*` keys otherwise override email's quiet default and
 every progress update became its own email.

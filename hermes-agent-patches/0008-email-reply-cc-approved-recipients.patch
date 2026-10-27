@@ -1,0 +1,114 @@
+--- a/plugins/platforms/email/adapter.py
++++ b/plugins/platforms/email/adapter.py
+@@ -16,7 +16,7 @@
+ from email.mime.multipart import MIMEMultipart
+ from email.mime.text import MIMEText
+ from email.mime.base import MIMEBase
+-from email.utils import formatdate
++from email.utils import formatdate, getaddresses
+ from email import encoders
+ from pathlib import Path
+ from typing import Any, Dict, List, Optional, Tuple
+@@ -609,7 +609,9 @@
+                 "message_id": msg.get("Message-ID", ""), "in_reply_to": msg.get("In-Reply-To", ""),
+                 "body": _extract_text_body(msg),
+                 "attachments": _extract_attachments(msg, skip_attachments=self._skip_attachments),
+-                "date": msg.get("Date", ""), "sender_authenticated": sender_authenticated, "auth_reason": auth_reason}
++                "date": msg.get("Date", ""), "sender_authenticated": sender_authenticated, "auth_reason": auth_reason,
++                "other_recipients": [a.strip().lower() for _, a in getaddresses(msg.get_all("To", []) + msg.get_all("Cc", []))
++                                     if "@" in a]}
+ 
+     @staticmethod
+     def _allow_all_senders() -> bool:
+@@ -663,7 +665,8 @@
+         # DOCUMENT wins over PHOTO for mixed attachments: run.py keys image handling off the per-path mime type regardless
+         # of message_type, but document-context injection gates strictly on MessageType.DOCUMENT — so DOCUMENT surfaces both.
+         kinds = {att["type"] for att in attachments}
+-        self._thread_context[sender_addr] = {"subject": subject, "message_id": msg_data["message_id"]}
++        self._thread_context[sender_addr] = {"subject": subject, "message_id": msg_data["message_id"],
++                                             "cc": self._reply_cc(sender_addr, msg_data.get("other_recipients", []))}
+         name = msg_data["sender_name"] or sender_addr
+         event = MessageEvent(
+             text=text or "(empty email)", message_id=msg_data["message_id"],
+@@ -722,6 +725,15 @@
+             self._outbox.setdefault(chat_id, []).insert(0, (body, reply_to))
+             self._outbox_tasks[chat_id] = asyncio.get_running_loop().create_task(self._flush_after(chat_id))
+ 
++    def _reply_cc(self, sender_addr: str, others: List[str]) -> List[str]:
++        """Who to Cc on the reply (hermes-deploy patch 0008): the inbound mail's other To/Cc recipients, but only those
++        on EMAIL_ALLOWED_USERS or the receive-only EMAIL_CC_RECIPIENTS. Being Cc'd never grants the right to instruct
++        the agent -- that stays EMAIL_ALLOWED_USERS alone -- and the allowlist keeps a sender from using Cc as a relay."""
++        allowed = {a.strip().lower() for name in ("EMAIL_ALLOWED_USERS", "EMAIL_CC_RECIPIENTS")
++                   for a in _get_secret(name, "").split(",") if a.strip()}
++        skip = {sender_addr.lower(), self._address.lower()}
++        return list(dict.fromkeys(a for a in others if a in allowed and a not in skip))
++
+     def _message_id_domain(self) -> str:
+         """Domain for generated Message-IDs; ``localhost`` when EMAIL_ADDRESS lacks ``@``."""
+         return (self._address.rsplit("@", 1)[-1] if "@" in self._address else "") or "localhost"
+@@ -736,7 +748,8 @@
+         original_msg_id = reply_to_msg_id or ctx.get("message_id")
+         threading = (("In-Reply-To", original_msg_id), ("References", original_msg_id)) if original_msg_id else ()
+         msg_id = f"<hermes-{uuid.uuid4().hex[:12]}@{self._message_id_domain()}>"
+-        for key, value in (("From", self._address), ("To", to_addr), ("Subject", subject), *threading,
++        cc = (("Cc", ", ".join(ctx["cc"])),) if ctx.get("cc") else ()
++        for key, value in (("From", self._address), ("To", to_addr), *cc, ("Subject", subject), *threading,
+                            ("Date", formatdate(localtime=True)), ("Message-ID", msg_id)):
+             msg[key] = value
+         if body or attach_empty_body:
+--- /dev/null
++++ b/tests/gateway/test_email_reply_cc.py
+@@ -0,0 +1,53 @@
++"""Reply Cc (hermes-deploy patch 0008): a reply goes to the sender and Cc's the inbound mail's other
++To/Cc recipients, but only those on EMAIL_ALLOWED_USERS or the receive-only EMAIL_CC_RECIPIENTS.
++Being Cc'd never lets someone instruct the agent; the sender allowlist is unchanged."""
++import plugins.platforms.email.adapter as mod
++from plugins.platforms.email.adapter import EmailAdapter
++
++SECRETS = {"EMAIL_ALLOWED_USERS": "alice@corp.com, Bob@corp.com",
++           "EMAIL_CC_RECIPIENTS": "carol@corp.com"}
++
++
++def make(monkeypatch) -> EmailAdapter:
++    monkeypatch.setattr(mod, "_get_secret", lambda name, default="": SECRETS.get(name, default))
++    a = object.__new__(EmailAdapter)
++    a._address, a._thread_context = "bot@gmail.com", {}
++    a._skip_attachments, a._authserv_id = False, None
++    return a
++
++
++RAW = (b"From: Alice <alice@corp.com>\r\n"
++       b"To: bot@gmail.com, Bob <bob@corp.com>\r\n"
++       b"Cc: carol@corp.com, stranger@evil.com, BOT@gmail.com\r\n"
++       b"Subject: Vacation rentals\r\nMessage-ID: <m1@corp.com>\r\n\r\nhi\r\n")
++
++
++def test_parse_collects_to_and_cc(monkeypatch):
++    msg = make(monkeypatch)._parse_fetched_message(b"1", RAW)
++    assert msg["other_recipients"] == ["bot@gmail.com", "bob@corp.com", "carol@corp.com",
++                                       "stranger@evil.com", "bot@gmail.com"]
++
++
++def test_reply_cc_keeps_only_approved_and_drops_self_and_sender(monkeypatch):
++    a = make(monkeypatch)
++    others = ["bot@gmail.com", "bob@corp.com", "carol@corp.com", "stranger@evil.com", "alice@corp.com",
++              "bob@corp.com"]
++    assert a._reply_cc("alice@corp.com", others) == ["bob@corp.com", "carol@corp.com"]
++
++
++def test_new_reply_sets_cc_header_only_when_there_is_one(monkeypatch):
++    a = make(monkeypatch)
++    a._thread_context["alice@corp.com"] = {"subject": "Vacation rentals", "message_id": "<m1@corp.com>",
++                                         "cc": ["bob@corp.com", "carol@corp.com"]}
++    msg, _, subject = a._new_reply("alice@corp.com", "done")
++    assert msg["Cc"] == "bob@corp.com, carol@corp.com" and msg["To"] == "alice@corp.com"
++    assert subject == "Re: Vacation rentals" and msg["In-Reply-To"] == "<m1@corp.com>"
++    assert a._new_reply("someone@corp.com", "cron digest")[0]["Cc"] is None
++
++
++def test_cc_only_recipient_still_cannot_instruct(monkeypatch):
++    a = make(monkeypatch)
++    a._require_authenticated_sender = False
++    monkeypatch.setattr(EmailAdapter, "_allow_all_senders", staticmethod(lambda: False))
++    assert not a._sender_accepted("carol@corp.com", {})
++    assert a._sender_accepted("bob@corp.com", {})
