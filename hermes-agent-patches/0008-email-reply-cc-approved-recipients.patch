@@ -9,18 +9,19 @@
  from email import encoders
  from pathlib import Path
  from typing import Any, Dict, List, Optional, Tuple
-@@ -609,7 +609,9 @@
+@@ -609,7 +609,10 @@
                  "message_id": msg.get("Message-ID", ""), "in_reply_to": msg.get("In-Reply-To", ""),
                  "body": _extract_text_body(msg),
                  "attachments": _extract_attachments(msg, skip_attachments=self._skip_attachments),
 -                "date": msg.get("Date", ""), "sender_authenticated": sender_authenticated, "auth_reason": auth_reason}
 +                "date": msg.get("Date", ""), "sender_authenticated": sender_authenticated, "auth_reason": auth_reason,
-+                "other_recipients": [a.strip().lower() for _, a in getaddresses(msg.get_all("To", []) + msg.get_all("Cc", []))
-+                                     if "@" in a]}
++                # Outlook writes bare addresses as 'x@y.com', which getaddresses keeps quoted.
++                "other_recipients": [a.strip().strip("'\"").lower()
++                                     for _, a in getaddresses(msg.get_all("To", []) + msg.get_all("Cc", [])) if "@" in a]}
  
      @staticmethod
      def _allow_all_senders() -> bool:
-@@ -663,7 +665,8 @@
+@@ -663,7 +666,8 @@
          # DOCUMENT wins over PHOTO for mixed attachments: run.py keys image handling off the per-path mime type regardless
          # of message_type, but document-context injection gates strictly on MessageType.DOCUMENT — so DOCUMENT surfaces both.
          kinds = {att["type"] for att in attachments}
@@ -30,7 +31,7 @@
          name = msg_data["sender_name"] or sender_addr
          event = MessageEvent(
              text=text or "(empty email)", message_id=msg_data["message_id"],
-@@ -722,6 +725,15 @@
+@@ -722,6 +726,15 @@
              self._outbox.setdefault(chat_id, []).insert(0, (body, reply_to))
              self._outbox_tasks[chat_id] = asyncio.get_running_loop().create_task(self._flush_after(chat_id))
  
@@ -46,7 +47,7 @@
      def _message_id_domain(self) -> str:
          """Domain for generated Message-IDs; ``localhost`` when EMAIL_ADDRESS lacks ``@``."""
          return (self._address.rsplit("@", 1)[-1] if "@" in self._address else "") or "localhost"
-@@ -736,7 +748,8 @@
+@@ -736,7 +749,8 @@
          original_msg_id = reply_to_msg_id or ctx.get("message_id")
          threading = (("In-Reply-To", original_msg_id), ("References", original_msg_id)) if original_msg_id else ()
          msg_id = f"<hermes-{uuid.uuid4().hex[:12]}@{self._message_id_domain()}>"
@@ -79,14 +80,14 @@
 +
 +RAW = (b"From: Alice <alice@corp.com>\r\n"
 +       b"To: bot@gmail.com, Bob <bob@corp.com>\r\n"
-+       b"Cc: carol@corp.com, stranger@evil.com, BOT@gmail.com\r\n"
++       b"Cc: carol@corp.com, stranger@evil.com, BOT@gmail.com, 'dave@corp.com'\r\n"
 +       b"Subject: Vacation rentals\r\nMessage-ID: <m1@corp.com>\r\n\r\nhi\r\n")
 +
 +
 +def test_parse_collects_to_and_cc(monkeypatch):
 +    msg = make(monkeypatch)._parse_fetched_message(b"1", RAW)
 +    assert msg["other_recipients"] == ["bot@gmail.com", "bob@corp.com", "carol@corp.com",
-+                                       "stranger@evil.com", "bot@gmail.com"]
++                                       "stranger@evil.com", "bot@gmail.com", "dave@corp.com"]
 +
 +
 +def test_reply_cc_keeps_only_approved_and_drops_self_and_sender(monkeypatch):
