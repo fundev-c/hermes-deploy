@@ -10,7 +10,7 @@ Your own `hermes` CLI (the default profile) is unchanged.
 |---|---|
 | `hermes-sandbox:1` (`Dockerfile`) | Python 3.12 + pandas/openpyxl/numpy/xlrd, node, git. Runs as uid 1000, root fs read-only. `/workspace` and `/root` are per-session tmpfs, so nothing survives a session. |
 | `hermes-sbx` network | `--internal`: no route out, no DNS for outside names. |
-| `hermes-egress` (squid, `squid.conf`) | The only way out. It allows HTTPS CONNECT to PyPI, npm and GitHub. It denies every other site and any private or loopback address. |
+| `hermes-egress` (squid, `squid.conf`) | The only way out. It allows HTTPS CONNECT to any public site (since 2026-10-27, for lead scraping). It denies plain http, other ports, local names, and any private, loopback, CGNAT or link-local address, whatever a name resolves to. After editing `squid.conf`, run `docker restart hermes-egress`: the file is bind-mounted and editors replace its inode. |
 | `drive_to_sandbox` / `sandbox_to_drive` | The only way files move between BearDrive and the sandbox (beardrive plugin). |
 | Patch 0002 | Stops a cron job's own `enabled_toolsets` from widening past `platform_toolsets.cron`. |
 

@@ -46,6 +46,9 @@ services:
   playwright-service:
     <<: *hardening
     image: ghcr.io/firecrawl/playwright-service@sha256:47da52c036b55580d5d0812fa530eacfe03533ebad9449a50858ff697db04f71
+    # The image's `pnpm start` makes corepack download pnpm from npm, which fc-int can't reach
+    # (EAI_AGAIN); the start script is just this.
+    command: ["node", "dist/api.js"]
     environment:
       <<: *proxy
       PORT: 3000
@@ -78,6 +81,11 @@ services:
       POSTGRES_PORT: 5432
       BULL_AUTH_KEY: ${FC_BULL_AUTH_KEY:?run up.sh}
       NUM_WORKERS_PER_QUEUE: 2
+      # The harness starts NUQ_WORKER_COUNT (default 5) node workers next to api/worker/extract-worker;
+      # at 5 the container is OOM-killed (137) within seconds of starting.
+      NUQ_WORKER_COUNT: 1
+      # Six node processes share this container; cap each heap so one can't take the lot.
+      NODE_OPTIONS: --max-old-space-size=256
       CRAWL_CONCURRENT_REQUESTS: 2
       MAX_CONCURRENT_JOBS: 2
       BROWSER_POOL_SIZE: 2
@@ -92,16 +100,17 @@ services:
       nuq-postgres: {condition: service_healthy}
     networks: [fc-int]
     cpus: 2.0
-    mem_limit: 900m
-    memswap_limit: 900m
+    mem_limit: 1400m
+    memswap_limit: 2400m  # startup peaks ~1.7 GB across six node processes; let the spike swap
 
   redis:
     <<: *hardening
     image: redis@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "48mb"]
-    cap_add: [SETUID, SETGID]
+    # Run as the image's redis user: as root the entrypoint chowns /data, which cap_drop ALL forbids.
+    user: "999:1000"
     read_only: true
-    tmpfs: ["/data"]
+    tmpfs: ["/data:uid=999,gid=1000"]
     networks: [fc-int]
     mem_limit: 64m
 
