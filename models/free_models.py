@@ -129,6 +129,13 @@ def probe(model: str, url: str, key: str) -> dict:
         return {"model": model, "ok": False, "why": str(e)[:200]}
 
 
+def probe_twice(model: str, url: str, key: str) -> dict:
+    """Models are nondeterministic: one fumbled answer shouldn't evict a model that's in the chain, so a
+    behavioural failure gets a second try. HTTP errors (gone, not free, no capacity) don't."""
+    r = probe(model, url, key)
+    return probe(model, url, key) if not r["ok"] and not r["why"].startswith("HTTP") else r
+
+
 def ranked(current: list[str], passing: dict[str, dict]) -> list[str]:
     keep = [m for m in current if m in passing]
     new = sorted((m for m in passing if m not in keep), key=lambda m: passing[m]["seconds"])
@@ -228,7 +235,7 @@ def main() -> int:
     cands, skipped = candidates(nous, openrouter)
     or_only = sorted(m for m, v in openrouter.items() if m.endswith(":free") and is_free(v) and m not in catalog)
     with cf.ThreadPoolExecutor(8) as ex:
-        results = list(ex.map(lambda m: probe(m["id"], f"{base}/chat/completions", key), cands))
+        results = list(ex.map(lambda m: probe_twice(m["id"], f"{base}/chat/completions", key), cands))
     passing = {r["model"]: r for r in results if r["ok"]}
     for r in sorted(results, key=lambda r: (not r["ok"], r.get("seconds", 0))):
         print(("PASS %5.1fs " % r["seconds"] if r["ok"] else "FAIL        ") + r["model"] + ("" if r["ok"] else f"  ({r['why']})"))
