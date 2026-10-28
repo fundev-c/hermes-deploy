@@ -27,6 +27,6 @@ Live copies from the Linux box as of 2026-09-30. `SETUP.md` is still written for
   refresh token every 7 days: reconnect the credential in n8n weekly. The calendar ID must be an
   email address; `primary` fails n8n's validation.
 
-Hermes core patches 0001–0013 are in `../hermes-agent-patches/`. The plugins are in
+Hermes core patches 0001–0015 are in `../hermes-agent-patches/`. The plugins are in
 `../hermes-home/plugins/` (beardrive, learning, firecrawl_local). Sandboxed self-hosted Firecrawl is in
 `../firecrawl/`. Champ skills sync is in `../champ-skills/`.

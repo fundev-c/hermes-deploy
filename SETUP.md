@@ -78,6 +78,8 @@ git apply         "$R\hermes-agent-patches\0010-email-session-per-thread.patch"
 git apply         "$R\hermes-agent-patches\0011-media-host-path-no-docker-warning.patch"
 git apply         "$R\hermes-agent-patches\0012-email-inbox-alert-and-still-working-note.patch"
 git apply         "$R\hermes-agent-patches\0013-email-activity-log.patch"
+git apply         "$R\hermes-agent-patches\0014-email-one-task-at-a-time.patch"
+git apply         "$R\hermes-agent-patches\0015-email-one-email-per-reply.patch"
 ```
 
 Patch 0003 makes a multiplexed gateway cache a named profile's email attachments under that
@@ -122,6 +124,14 @@ The answer checker's judge has a 20 s deadline: `plugins.hook_callback_timeout` 
 `pre_verify` callback, rules included, when it runs over. Its rules also fail a reply that pastes more
 than 8,000 characters into the body while attaching a file. `tlsguard.py` blocks terminal commands that
 turn certificate checks off (`curl -k`, `verify=False`, ...).
+Patch 0014 runs one email task at a time (`EMAIL_MAX_PARALLEL_TASKS`, default 1): this 7.7 GB machine
+gives every task a 1 GB sandbox on top of Firecrawl. A second email waits for the slot; it is never
+rejected (the gateway's `max_concurrent_sessions` rejects instead, which loses the email). The 10-minute
+still-working note covers the wait.
+Patch 0015 stages attachments in the outbox too, so a reply with several files arrives as one email
+instead of one email per file.
+The team `.env` sets `EMAIL_HOME_ADDRESS` to the owner's work address: the daily digest and scheduled
+tasks delivered by email go there, and that address may grade any task.
 The learning plugin also guards file delivery, since the model ignored the SOUL rules for it
 (email tasks, 27 and 28 Oct): `mailguard.py` blocks `send_email` to the sender being answered and any
 `MEDIA:` line typed into a `send_email` body, and the verifier fails a reply when a file was

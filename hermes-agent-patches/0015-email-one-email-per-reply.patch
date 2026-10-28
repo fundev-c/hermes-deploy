@@ -1,0 +1,111 @@
+--- a/plugins/platforms/email/adapter.py
++++ b/plugins/platforms/email/adapter.py
+@@ -612,7 +612,7 @@
+         self._poll_task = None
+         for task, _, _ in getattr(self, "_ack_timers", {}).values():
+             task.cancel()
+-        for box in list(getattr(self, "_outbox", {})):  # never drop staged replies on shutdown/reconnect
++        for box in list({**getattr(self, "_outbox", {}), **self.__dict__.get("_outbox_files", {})}):  # never drop staged replies
+             await self._flush_outbox(box)
+         logger.info("[Email] Disconnected.")
+ 
+@@ -885,11 +885,19 @@
+         box = (box, "") if isinstance(box, str) else box
+         chat_id = box[0]
+         body, reply_to = self._take_outbox(box)
+-        if not body:
++        files = self.__dict__.get("_outbox_files", {}).pop(box, [])
++        if not body and not files:
+             return
+-        result = await self._run_send(self._send_email, (chat_id, body, reply_to), "[Email] Staged send failed to %s: %s", chat_id)
++        if files:  # one email carrying the staged text and every staged file; an unattachable file is skipped, logged
++            pairs = [(Path(p), n or Path(p).name) for p, n in files]
++            result = await self._run_send(lambda *a: self._send_with_files(*a, lenient=True, reply_to_msg_id=reply_to),
++                                          (chat_id, body, pairs), "[Email] Staged send failed to %s: %s", chat_id)
++        else:
++            result = await self._run_send(self._send_email, (chat_id, body, reply_to), "[Email] Staged send failed to %s: %s", chat_id)
+         if not result.success and _retry:  # one retry on the next window, ahead of anything newer
+             self._outbox.setdefault(box, []).insert(0, (body, reply_to))
++            if files:
++                self._outbox_files.setdefault(box, [])[:0] = files
+             self._outbox_tasks[box] = asyncio.get_running_loop().create_task(self._flush_after(box))
+ 
+     def _reply_cc(self, sender_addr: str, others: List[str]) -> List[str]:
+@@ -1014,9 +1022,18 @@
+ 
+     async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
+                             file_name: Optional[str] = None, reply_to: Optional[str] = None, **kwargs) -> SendResult:
+-        """Send a file as an email attachment (with any staged text for this recipient in the body)."""
++        """Send a file as an email attachment (with any staged text for this recipient in the body). With
++        batch_seconds > 0 the file is staged too (patch 0015), so a reply with several files is ONE email."""
+         self._cancel_ack(chat_id, reply_to, kwargs.get("metadata"))
+-        staged, staged_reply = self._take_outbox(self._box(chat_id, reply_to, kwargs.get("metadata")))
++        box = self._box(chat_id, reply_to, kwargs.get("metadata"))
++        if getattr(self, "_batch_seconds", 0) > 0:
++            self.__dict__.setdefault("_outbox_files", {}).setdefault(box, []).append((file_path, file_name))
++            self._outbox.setdefault(box, []).append(((caption or "").strip(), reply_to))
++            task = self._outbox_tasks.get(box)
++            if task is None or task.done():
++                self._outbox_tasks[box] = asyncio.get_running_loop().create_task(self._flush_after(box))
++            return SendResult(success=True)
++        staged, staged_reply = self._take_outbox(box)
+         body = "\n\n".join(p for p in (staged, (caption or "").strip()) if p)
+         return await self._run_send(self._send_email_with_attachment, (chat_id, body, file_path, file_name, reply_to or staged_reply),
+                                     "[Email] Send document failed: %s")
+--- a/tests/gateway/test_email_outbox_batching.py
++++ b/tests/gateway/test_email_outbox_batching.py
+@@ -45,19 +45,45 @@
+     assert sent == {"a@example.com": "same", "b@example.com": "other"}
+ 
+ 
+-def test_attachment_carries_staged_text_in_the_same_email():
+-    a = make(30)
++def test_files_and_text_in_one_window_become_one_email():
++    """Patch 0015: a reply with two files used to arrive as two emails."""
++    a = make(0.05)
++    a._send_with_files = MagicMock(return_value="<id@x>")
+ 
+     async def go():
+         await a.send("u@example.com", "Here is the corrected sheet.", reply_to="<orig@x>")
+-        r = await a.send_document("u@example.com", "/tmp/x.xlsx", caption="attach")
+-        await asyncio.sleep(0)
+-        return r
+-    assert asyncio.run(go()).success
++        r1 = await a.send_document("u@example.com", "/tmp/x.xlsx", caption="attach")
++        r2 = await a.send_document("u@example.com", "/tmp/notes.csv", file_name="notes.csv")
++        a._send_with_files.assert_not_called()
++        await asyncio.sleep(0.15)
++        return r1.success and r2.success
++    assert asyncio.run(go())
+     a._send_email.assert_not_called()
+-    to, body, path, name, rid = a._send_email_with_attachment.call_args.args
+-    assert body == "Here is the corrected sheet.\n\nattach" and rid == "<orig@x>"
+-    assert not a._outbox and not a._outbox_tasks
++    a._send_email_with_attachment.assert_not_called()
++    (to, body, files), kw = a._send_with_files.call_args
++    assert to == "u@example.com" and body == "Here is the corrected sheet.\n\nattach" and kw["reply_to_msg_id"] == "<orig@x>"
++    assert [(str(p), n) for p, n in files] == [("/tmp/x.xlsx", "x.xlsx"), ("/tmp/notes.csv", "notes.csv")]
++    assert a._send_with_files.call_count == 1 and not a._outbox and not a._outbox_tasks
++
++
++def test_staged_files_survive_disconnect():
++    a = make(30)
++    a._send_with_files = MagicMock(return_value="<id@x>")
++
++    async def go():
++        await a.send_document("u@example.com", "/tmp/x.xlsx")
++        await a.disconnect()
++    asyncio.run(go())
++    assert a._send_with_files.call_count == 1
++
++
++def test_batching_off_still_sends_a_file_at_once():
++    a = make(0)
++
++    async def go():
++        return await a.send_document("u@example.com", "/tmp/x.xlsx", caption="here")
++    assert asyncio.run(go()).success
++    a._send_email_with_attachment.assert_called_once()
+ 
+ 
+ def test_disconnect_flushes_instead_of_dropping():

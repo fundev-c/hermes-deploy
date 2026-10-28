@@ -1,0 +1,92 @@
+--- a/plugins/platforms/email/adapter.py
++++ b/plugins/platforms/email/adapter.py
+@@ -371,6 +371,30 @@
+     # when the inbox is back.
+     _inbox_down_since: Dict[str, float] = {}
+     _inbox_alerted: set = set()
++    # One heavy job at a time (hermes-deploy patch 0014): this 7.7 GB machine runs a 1 GB sandbox per task on
++    # top of Firecrawl. Each email's processing waits here for a slot (EMAIL_MAX_PARALLEL_TASKS, default 1)
++    # instead of running alongside another task. Class-level: every adapter in the process shares the slots.
++    _task_slots: Optional[asyncio.Semaphore] = None
++    _slot_holders: set = set()
++
++    @classmethod
++    def _slots(cls) -> asyncio.Semaphore:
++        if cls._task_slots is None:
++            cls._task_slots = asyncio.Semaphore(max(1, _esecret_int("EMAIL_MAX_PARALLEL_TASKS", 1)))
++        return cls._task_slots
++
++    async def on_processing_start(self, event: Any) -> None:
++        slots = self._slots()
++        if slots.locked():
++            logger.info("[Email] Another task is running; the email from %s waits its turn", event.source.chat_id)
++        await slots.acquire()
++        self._slot_holders.add(id(event))
++
++    async def on_processing_complete(self, event: Any, outcome: Any) -> None:
++        if id(event) in self._slot_holders:
++            self._slot_holders.discard(id(event))
++            self._slots().release()
++        await super().on_processing_complete(event, outcome)
+ 
+     def _activity(self, kind: str, **fields: Any) -> None:
+         """Append one line to <owner profile>/logs/email.jsonl (hermes-deploy patch 0013): mail in, mail out,
+--- /dev/null
++++ b/tests/gateway/test_email_one_task_at_a_time.py
+@@ -0,0 +1,56 @@
++"""One heavy job at a time (hermes-deploy patch 0014): an email's processing waits for a slot instead of
++running alongside another task; nothing is rejected, and a cancelled wait never leaks a slot."""
++import asyncio
++from types import SimpleNamespace
++
++import pytest
++
++import plugins.platforms.email.adapter as mod
++from plugins.platforms.email.adapter import EmailAdapter
++
++
++@pytest.fixture(autouse=True)
++def fresh_slots(monkeypatch):
++    monkeypatch.setattr(mod, "_get_secret", lambda name, default="": default)
++    monkeypatch.setattr(EmailAdapter, "_task_slots", None)
++    monkeypatch.setattr(EmailAdapter, "_slot_holders", set())
++
++
++def event(sender):
++    return SimpleNamespace(source=SimpleNamespace(chat_id=sender))
++
++
++def test_second_email_waits_for_the_first():
++    a, order = object.__new__(EmailAdapter), []
++
++    async def task(ev, name, work):
++        await a.on_processing_start(ev)
++        order.append(f"{name} start")
++        await asyncio.sleep(work)
++        order.append(f"{name} end")
++        await a.on_processing_complete(ev, "success")
++
++    async def go():
++        await asyncio.gather(task(event("carol@corp.com"), "A", 0.05), task(event("dave@corp.com"), "B", 0.01))
++    asyncio.run(go())
++    assert order == ["A start", "A end", "B start", "B end"]
++
++
++def test_cancelled_wait_does_not_leak_the_slot():
++    a = object.__new__(EmailAdapter)
++
++    async def go():
++        first = event("carol@corp.com")
++        await a.on_processing_start(first)
++        waiting = event("dave@corp.com")
++        t = asyncio.create_task(a.on_processing_start(waiting))
++        await asyncio.sleep(0.01)
++        t.cancel()
++        await asyncio.gather(t, return_exceptions=True)
++        await a.on_processing_complete(waiting, "cancelled")  # the gateway reports the cancel too
++        await a.on_processing_complete(first, "success")
++        third = event("erin@corp.com")
++        await asyncio.wait_for(a.on_processing_start(third), 0.5)  # a free slot, not a deadlock
++        await a.on_processing_complete(third, "success")
++    asyncio.run(go())
++    assert EmailAdapter._slot_holders == set()
