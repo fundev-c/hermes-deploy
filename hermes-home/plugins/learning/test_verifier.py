@@ -185,3 +185,32 @@ def test_file_sent_with_send_email_attachments_passes():
 def test_drive_only_save_is_not_flagged():
     v = V.verify(turn("Put the cleaned list in the drive please.", TERM_OK, SAVED), "Saved it to the drive as x_CHECKED.xlsx.")
     assert not any("never reached" in p for p in v["rules"])
+
+
+def test_files_written_to_the_outbox_count_as_delivered():
+    msgs = turn(REQ, TERM_OK)
+    msgs[-2]["tool_calls"][0]["function"]["arguments"] = json.dumps(
+        {"command": "python3 fix.py && cp x_CHECKED.xlsx /workspace/out/"})
+    v = V.verify(msgs, "Done. The corrected sheet is attached.")
+    assert v["verdict"] == "pass", v["rules"]
+
+
+def test_transform_appends_collected_outputs(monkeypatch):
+    import types
+    fake = types.ModuleType("fake_beardrive_tools")
+    seen = {}
+
+    def collect_outputs(task_id, already_attached=()):
+        seen.update(task_id=task_id, skip=list(already_attached))
+        return ["MEDIA:/c/out_0badc0de_report.xlsx"]
+    fake.collect_outputs = collect_outputs
+    monkeypatch.setattr(L, "_beardrive_tools", lambda: fake)
+    out = L.on_transform_llm_output(response_text="Done.\nMEDIA:/c/out_12345678_old.csv", platform="email",
+                                    turn_id="t1", session_id="s1")
+    assert "MEDIA:/c/out_0badc0de_report.xlsx" in out and out.index("report.xlsx") < out.index("Task T-")
+    assert seen == {"task_id": "s1", "skip": ["old.csv"]}
+
+
+def test_beardrive_is_found_by_location_not_name():
+    from beardrive import tools as T  # noqa: F401  (same plugins folder as learning)
+    assert L._beardrive_tools().__file__.endswith("beardrive/tools.py")

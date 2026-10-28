@@ -1,0 +1,291 @@
+--- a/plugins/platforms/email/adapter.py
++++ b/plugins/platforms/email/adapter.py
+@@ -9,9 +9,12 @@
+ import logging
+ import os
+ import re
++import shutil
+ import smtplib
+ import socket
+ import ssl
++import subprocess
++import time
+ import uuid
+ from email.header import decode_header
+ from email.mime.multipart import MIMEMultipart
+@@ -320,6 +323,20 @@
+ _DRIVE_OUT_PREFIX = re.compile(r"^out_[0-9a-f]{8}_")  # beardrive's sandbox_to_drive cache name
+ _SUBJECT_PREFIX = re.compile(r"^\s*(?:(?:re|fwd?|aw|wg|sv|antw)(?:\[\d+\])?\s*:\s*|\[[^\]]*\]\s*)+", re.I)
+ _MSG_CONTEXT_MAX = 500
++_ACK_TEXT = ("Hi, this is taking longer than usual. I'm still working on it and will reply in this thread as soon "
++             "as it's done.")
++
++
++def _desktop_notify(title: str, body: str) -> None:
++    """Best-effort desktop notification on the gateway host (hermes-deploy patch 0012); silent without a desktop."""
++    exe = shutil.which("notify-send")
++    if not exe:
++        return
++    try:
++        subprocess.run([exe, "--app-name=Hermes", "--urgency=critical", title, body],
++                       timeout=5, check=False, capture_output=True)
++    except Exception:
++        logger.debug("[Email] desktop notification failed", exc_info=True)
+ 
+ 
+ def _thread_key(subject: str, message_id: str) -> str:
+@@ -348,6 +365,29 @@
+     # adapter per retry; without this connect(is_reconnect=True) would re-mark the mailbox seen and skip
+     # mail that arrived during the outage. Keyed by address (multiplex runs several accounts); same-process only.
+     _seen_uids_snapshot: Dict[str, set] = {}
++    # Inbox health per account (hermes-deploy patch 0012), class-level for the same reason: an outage spans many
++    # fresh adapters. After EMAIL_INBOX_ALERT_MINUTES (default 10) unreachable, one desktop notification; another
++    # when the inbox is back.
++    _inbox_down_since: Dict[str, float] = {}
++    _inbox_alerted: set = set()
++
++    def _inbox_failed(self) -> None:
++        now = time.time()
++        since = self._inbox_down_since.setdefault(self._address, now)
++        minutes = int((now - since) // 60)
++        if self._address not in self._inbox_alerted and now - since >= 60 * _esecret_int("EMAIL_INBOX_ALERT_MINUTES", 10):
++            self._inbox_alerted.add(self._address)
++            logger.warning("[Email] Inbox %s unreachable for %d min; desktop alert sent", self._address, minutes)
++            _desktop_notify("Hermes email is offline",
++                            f"{self._address} has been unreachable for {minutes} min. New emails wait until it reconnects.")
++
++    def _inbox_ok(self) -> None:
++        since = self._inbox_down_since.pop(self._address, None)
++        if self._address in self._inbox_alerted:
++            self._inbox_alerted.discard(self._address)
++            minutes = int((time.time() - since) // 60) if since else 0
++            _desktop_notify("Hermes email is back",
++                            f"{self._address} reconnected after {minutes} min. Waiting emails are being processed now.")
+ 
+     def __init__(self, config: PlatformConfig):
+         super().__init__(config, Platform.EMAIL)
+@@ -395,6 +435,8 @@
+         # inbound Message-ID -> that mail's reply context and thread (patch 0010): one sender can have several
+         # threads in flight, so a reply is matched to the mail it answers, not to the sender's latest mail.
+         self._msg_context: Dict[str, Dict[str, Any]] = {}
++        # inbound Message-ID -> (timer, recipient, thread) for the one "still working" note (patch 0012)
++        self._ack_timers: Dict[str, Tuple[asyncio.Task, str, str]] = {}
+         logger.info("[Email] Adapter initialized for %s", self._address)
+ 
+     def _trim_seen_uids(self) -> None:
+@@ -473,8 +515,10 @@
+                 self._trim_seen_uids()
+                 logger.info(passed, len(self._seen_uids))
+             self._seen_uids_snapshot[self._address] = set(self._seen_uids)
++            self._inbox_ok()
+             return True
+         except Exception as e:
++            self._inbox_failed()
+             # Always set an explicit fatal code, else the gateway treats every failure as transient with zero
+             # owner signal. retryable=True because imaplib raises the same generic IMAP4.error for bad credentials
+             # AND transient NOs (Gmail "too many simultaneous connections"); loops surface via NEEDS_ATTENTION.
+@@ -521,6 +565,8 @@
+         self._running = False
+         await cancel_task(self._poll_task)
+         self._poll_task = None
++        for task, _, _ in getattr(self, "_ack_timers", {}).values():
++            task.cancel()
+         for box in list(getattr(self, "_outbox", {})):  # never drop staged replies on shutdown/reconnect
+             await self._flush_outbox(box)
+         logger.info("[Email] Disconnected.")
+@@ -607,6 +653,9 @@
+             # connection (#79889).
+             logger.error("[Email] IMAP fetch error: %s", e)
+             self._last_fetch_failed, self._last_fetch_error = True, str(e)
++            self._inbox_failed()
++        else:
++            self._inbox_ok()
+         # Keep the reconnect snapshot current so a mid-outage adapter recreation does not re-dispatch messages already processed.
+         self._seen_uids_snapshot[self._address] = set(self._seen_uids)
+         return results
+@@ -702,8 +751,43 @@
+             media_urls=[att["path"] for att in attachments], media_types=[att["media_type"] for att in attachments],
+             reply_to_message_id=msg_data["in_reply_to"] or None)
+         logger.info("[Email] New message from %s: %s", sender_addr, subject)
++        self._arm_ack(msg_data["message_id"], sender_addr, thread_id)
+         await self.handle_message(event)
+ 
++    def _arm_ack(self, message_id: str, chat_id: str, thread_id: str) -> None:
++        """Patch 0012: if no reply to this email has gone out after EMAIL_ACK_AFTER_MINUTES (default 10,
++        0 = off), send the sender one short "still working" note in the thread."""
++        delay = 60 * _esecret_int("EMAIL_ACK_AFTER_MINUTES", 10)
++        if delay <= 0 or not message_id:
++            return
++        timers = self.__dict__.setdefault("_ack_timers", {})
++        timers[message_id] = (asyncio.get_running_loop().create_task(self._ack_later(message_id, chat_id, thread_id, delay)),
++                              chat_id, thread_id)
++
++    async def _ack_later(self, message_id: str, chat_id: str, thread_id: str, delay: float) -> None:
++        try:
++            await asyncio.sleep(delay)
++        except asyncio.CancelledError:
++            return
++        self._ack_timers.pop(message_id, None)
++        logger.info("[Email] No reply to %s after %d min; sending a still-working note", chat_id, delay // 60)
++        await self.send(chat_id, _ACK_TEXT, reply_to=message_id, metadata={"thread_id": thread_id, "email_ack": True})
++
++    def _cancel_ack(self, chat_id: str, reply_to: Optional[str], metadata: Optional[Dict[str, Any]]) -> None:
++        """A reply is going out: stop the note for the email it answers (or, without an anchor, for its thread)."""
++        timers = getattr(self, "_ack_timers", {})
++        if (metadata or {}).get("email_ack"):  # the note itself: other emails in the thread still get theirs
++            return
++        if reply_to in timers:
++            doomed = [reply_to]
++        else:
++            box = self._box(chat_id, reply_to, metadata)
++            doomed = [mid for mid, (_, c, t) in timers.items() if (c, t) == box or (c == chat_id and not box[1])]
++        for mid in doomed:
++            task, _, _ = timers.pop(mid)
++            if task is not asyncio.current_task():
++                task.cancel()
++
+     async def _run_send(self, fn, args: tuple, log_fmt: str, *log_args) -> SendResult:
+         """Run a blocking SMTP sender in the executor; wrap its Message-ID in a SendResult."""
+         try:
+@@ -714,6 +798,7 @@
+ 
+     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+         """Send an email reply to the given address (staged into the outbox when batch_seconds > 0)."""
++        self._cancel_ack(chat_id, reply_to, metadata)
+         if getattr(self, "_batch_seconds", 0) > 0:
+             box = self._box(chat_id, reply_to, metadata)
+             self._outbox.setdefault(box, []).append((content or "", reply_to))
+@@ -850,6 +935,7 @@
+                 logger.warning("[Email] Skipping missing image: %s", local_path)
+         if not local_paths and not body_parts:
+             return SendResult(success=False, error="no valid images in batch")
++        self._cancel_ack(chat_id, None, metadata)
+         staged, _ = self._take_outbox(self._box(chat_id, None, metadata))
+         if staged:
+             body_parts.insert(0, staged)
+@@ -869,6 +955,7 @@
+     async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
+                             file_name: Optional[str] = None, reply_to: Optional[str] = None, **kwargs) -> SendResult:
+         """Send a file as an email attachment (with any staged text for this recipient in the body)."""
++        self._cancel_ack(chat_id, reply_to, kwargs.get("metadata"))
+         staged, staged_reply = self._take_outbox(self._box(chat_id, reply_to, kwargs.get("metadata")))
+         body = "\n\n".join(p for p in (staged, (caption or "").strip()) if p)
+         return await self._run_send(self._send_email_with_attachment, (chat_id, body, file_path, file_name, reply_to or staged_reply),
+--- /dev/null
++++ b/tests/gateway/test_email_inbox_alert.py
+@@ -0,0 +1,115 @@
++"""Inbox-down desktop alert (hermes-deploy patch 0012): one notification once the inbox has been
++unreachable for EMAIL_INBOX_ALERT_MINUTES (default 10) across reconnect attempts, one when it is back."""
++import pytest
++
++import plugins.platforms.email.adapter as mod
++from plugins.platforms.email.adapter import EmailAdapter
++
++
++@pytest.fixture
++def clock(monkeypatch):
++    now = {"t": 1_000_000.0}
++    monkeypatch.setattr(mod.time, "time", lambda: now["t"])
++    monkeypatch.setattr(mod, "_get_secret", lambda name, default="": default)
++    monkeypatch.setattr(EmailAdapter, "_inbox_down_since", {})
++    monkeypatch.setattr(EmailAdapter, "_inbox_alerted", set())
++    return now
++
++
++@pytest.fixture
++def alerts(monkeypatch):
++    sent = []
++    monkeypatch.setattr(mod, "_desktop_notify", lambda title, body: sent.append(title))
++    return sent
++
++
++def fresh() -> EmailAdapter:
++    """The reconnect watcher builds a new adapter per retry."""
++    a = object.__new__(EmailAdapter)
++    a._address = "bot@gmail.com"
++    return a
++
++
++def test_alerts_once_after_ten_minutes_across_fresh_adapters(clock, alerts):
++    for minute in (0, 0.5, 1.5, 3.5, 7.5):
++        clock["t"] = 1_000_000 + minute * 60
++        fresh()._inbox_failed()
++    assert alerts == []
++    for minute in (12.5, 17.5):
++        clock["t"] = 1_000_000 + minute * 60
++        fresh()._inbox_failed()
++    assert alerts == ["Hermes email is offline"]
++    clock["t"] += 60
++    fresh()._inbox_ok()
++    assert alerts == ["Hermes email is offline", "Hermes email is back"]
++
++
++def test_short_outage_is_silent(clock, alerts):
++    fresh()._inbox_failed()
++    clock["t"] += 240
++    fresh()._inbox_failed()
++    fresh()._inbox_ok()
++    assert alerts == [] and EmailAdapter._inbox_down_since == {}
++
++
++def test_failed_imap_probe_counts_as_down(clock, alerts, monkeypatch):
++    a = fresh()
++    a._imap_host, a._imap_port = "imap.gmail.com", 993
++    a._set_fatal_error = lambda *args, **kw: None
++    a._inbox = lambda: (_ for _ in ()).throw(OSError("Temporary failure in name resolution"))
++    assert a._probe_imap(is_reconnect=True) is False
++    assert "bot@gmail.com" in EmailAdapter._inbox_down_since
++
++
++# --- "still working" note --------------------------------------------------------------------------
++import asyncio  # noqa: E402
++from unittest.mock import AsyncMock, MagicMock  # noqa: E402
++
++
++def adapter(monkeypatch, ack_minutes: str):
++    secrets = {"EMAIL_ACK_AFTER_MINUTES": ack_minutes}
++    monkeypatch.setattr(mod, "_get_secret", lambda name, default="": secrets.get(name, default))
++    a = EmailAdapter.__new__(EmailAdapter)
++    a.__init__(MagicMock(extra={"address": "bot@gmail.com"}))
++    a._sender_accepted = lambda *args: True
++    a.handle_message = AsyncMock()
++    a._send_email = MagicMock(return_value="<id@x>")
++    return a
++
++
++def mail(a, mid, subject="Upper case"):
++    return a._dispatch_message({"sender_addr": "carol@corp.com", "sender_name": "Carol", "subject": subject,
++                                "body": "hi", "attachments": [], "message_id": mid, "in_reply_to": ""})
++
++
++def test_slow_task_gets_one_note_in_its_thread(monkeypatch):
++    a = adapter(monkeypatch, "1")
++    monkeypatch.setattr(mod, "_esecret_int", lambda name, default: 0.0005 if name == "EMAIL_ACK_AFTER_MINUTES" else default)
++
++    async def go():
++        await mail(a, "<1@x>")
++        await asyncio.sleep(0.1)
++    asyncio.run(go())
++    to, body, rid = a._send_email.call_args.args
++    assert a._send_email.call_count == 1 and rid == "<1@x>" and "still working" in body
++
++
++def test_reply_in_time_cancels_the_note(monkeypatch):
++    a = adapter(monkeypatch, "1")
++    monkeypatch.setattr(mod, "_esecret_int", lambda name, default: 0.001 if name == "EMAIL_ACK_AFTER_MINUTES" else default)
++
++    async def go():
++        await mail(a, "<1@x>")
++        await a.send("carol@corp.com", "Done.", reply_to="<1@x>")
++        await asyncio.sleep(0.15)
++    asyncio.run(go())
++    assert [c.args[1] for c in a._send_email.call_args_list] == ["Done."]
++
++
++def test_note_can_be_turned_off(monkeypatch):
++    a = adapter(monkeypatch, "0")
++
++    async def go():
++        await mail(a, "<1@x>")
++    asyncio.run(go())
++    assert a._ack_timers == {}

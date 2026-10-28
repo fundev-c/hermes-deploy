@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import secrets
+import sys
 import tempfile
 import threading
 import time
@@ -232,6 +233,37 @@ def on_pre_verify(session_id: str = "", platform: str = "", attempt: int = 0, fi
     return None
 
 
+_STAGED = re.compile(r"(?m)^\s*MEDIA:\s*\S*/out_[0-9a-f]{8}_(\S+)\s*$")
+
+
+def _beardrive_tools() -> Any:
+    """This profile's beardrive tools module. A multiplexed gateway loads each profile's copy under its
+    own module name, so match by location (the same plugins folder as this file), never by name."""
+    here = Path(__file__).resolve().parent.parent
+    for name, mod in list(sys.modules.items()):
+        path = getattr(mod, "__file__", None)
+        if name.endswith("tools") and path and Path(path).resolve() == here / "beardrive" / "tools.py":
+            return mod
+    return None
+
+
+def _collect_outputs(session_id: str, reply: str) -> List[str]:
+    """MEDIA: lines for the files the agent left in /workspace/out/ (beardrive collects, saves and
+    stages them). The gateway runs a turn with task_id = session_id, which names its sandbox. Only
+    transform_llm_output's first string result is used, so this rides on the learning transform
+    instead of a hook of its own."""
+    tools = _beardrive_tools()
+    if not session_id or not hasattr(tools, "collect_outputs"):
+        if session_id and tools is None:
+            logger.warning("learning: beardrive is not loaded in this profile; /workspace/out is not collected")
+        return []
+    try:
+        return tools.collect_outputs(session_id, already_attached=_STAGED.findall(reply))
+    except Exception:
+        logger.warning("learning: collecting /workspace/out failed", exc_info=True)
+        return []
+
+
 def on_transform_llm_output(response_text: str = "", platform: str = "", turn_id: str = "",
                             session_id: str = "", **_: Any):
     if not _is_ours(platform) or not response_text or str(platform).lower() != "email":
@@ -239,6 +271,9 @@ def on_transform_llm_output(response_text: str = "", platform: str = "", turn_id
     tid = "T-" + secrets.token_hex(3)
     _turn_ids[str(turn_id)] = tid
     text = response_text.rstrip()
+    media = _collect_outputs(str(session_id), text)
+    if media:
+        text += "\n\n" + "\n".join(media)
     v = _verdicts.get(str(session_id))
     if v and v["verdict"] == "fail":
         from . import verifier

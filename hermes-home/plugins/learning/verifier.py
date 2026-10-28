@@ -80,7 +80,8 @@ def _tool_events(turn: List[dict]) -> List[Dict[str, Any]]:
             except (ValueError, TypeError):
                 parsed = {}
             ev = {"name": fn.get("name", "?"), "args": str(raw)[:300], "result": "", "error": False,
-                  "attachments": bool(isinstance(parsed, dict) and str(parsed.get("attachments") or "").strip())}
+                  "attachments": bool(isinstance(parsed, dict) and str(parsed.get("attachments") or "").strip()),
+                  "outbox": fn.get("name") == "terminal" and "/workspace/out/" in str(raw)}
             calls[str(tc.get("id"))] = ev
             order.append(ev)
         if m.get("role") == "tool":
@@ -126,20 +127,22 @@ def rule_problems(request: str, reply: str, events: List[Dict[str, Any]]) -> Lis
         problems.append("The reply is empty.")
         return problems
     saved = _saved_files(events)
+    # Files written to /workspace/out/ are saved and attached after the reply (beardrive.collect_outputs).
+    outbox = any(ev.get("outbox") and not ev["error"] for ev in events)
     if _MEDIA_WS.search(reply):
         problems.append("The reply attaches a /workspace/... sandbox path, which cannot be emailed. Save the file "
                         "with sandbox_to_drive and use the 'attach' line it returns.")
-    if _CLAIMS_FILE.search(reply) and not saved:
+    if _CLAIMS_FILE.search(reply) and not saved and not outbox:
         problems.append("The reply says a file was attached or saved to the drive, but no sandbox_to_drive or "
                         "drive_save_attachment call succeeded this turn.")
     mailed = any(ev["name"].split("__")[-1] == "send_email" and ev.get("attachments") and not ev["error"]
                  for ev in events)
-    if (saved and not _MEDIA_LINE.search(reply) and not mailed
+    if (saved and not outbox and not _MEDIA_LINE.search(reply) and not mailed
             and (_CLAIMS_DELIVERY.search(reply) or _WANTS_OUTPUT.search(request))):
         problems.append(f"{saved[0]} was saved but never reached the sender: the reply has no MEDIA: line and no "
                         "send_email with attachments succeeded. Put the 'attach' line that sandbox_to_drive "
                         "returned on its own line in the reply.")
-    if _WANTS_OUTPUT.search(request) and not saved and not _REFUSAL.search(reply):
+    if _WANTS_OUTPUT.search(request) and not saved and not outbox and not _REFUSAL.search(reply):
         problems.append("The request asks for a file (sheet/report/document) but none was saved to the drive.")
     if events and events[-1]["error"] and events[-1]["name"] not in _SKIP_TOOLS:
         problems.append(f"The last tool call ({events[-1]['name']}) failed and was not retried: "

@@ -27,8 +27,8 @@ def problem(args: Dict[str, Any], platform: str, sender: str) -> Optional[str]:
     to = {a.lower() for a in _ADDR.findall(str(args.get("to") or ""))}
     if str(platform).lower() == "email" and sender and sender in to:
         return (f"{sender} sent the email you are answering, so your reply already goes to them. Do not "
-                "send_email them: put each MEDIA: line on its own line in your final reply and the gateway "
-                "attaches the file.")
+                "send_email them: write the file to /workspace/out/ and it is attached to your final reply "
+                "automatically (or put a MEDIA: line from sandbox_to_drive on its own line in the reply).")
     if _MEDIA.search(str(args.get("body") or "")):
         return ("a MEDIA: line in the body is only text, not an attachment. Remove it from the body and pass "
                 "the MEDIA: path(s) in the attachments field.")

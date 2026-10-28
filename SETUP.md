@@ -74,6 +74,9 @@ git apply         "$R\hermes-agent-patches\0006-containment-web-contract.patch"
 git apply         "$R\hermes-agent-patches\0007-email-outbox-batching.patch"
 git apply         "$R\hermes-agent-patches\0008-email-reply-cc-approved-recipients.patch"
 git apply         "$R\hermes-agent-patches\0009-email-attachment-names.patch"
+git apply         "$R\hermes-agent-patches\0010-email-session-per-thread.patch"
+git apply         "$R\hermes-agent-patches\0011-media-host-path-no-docker-warning.patch"
+git apply         "$R\hermes-agent-patches\0012-email-inbox-alert-and-still-working-note.patch"
 ```
 
 Patch 0003 makes a multiplexed gateway cache a named profile's email attachments under that
@@ -93,6 +96,22 @@ Patch 0008 Cc's a reply to the inbound mail's other To/Cc recipients, but only t
 only `EMAIL_ALLOWED_USERS` can instruct the agent. Run `sync_allowlist.py` after changing either list.
 Patch 0009 names reply attachments without beardrive's `out_<id>_` cache prefix and quotes the
 filename, so `out_e02bd77e_Keyword_normalized.xlsx` arrives as `Keyword_normalized.xlsx`.
+Patch 0010 gives each email thread its own session: the thread is the subject without `Re:`/`Fwd:`/`[tag]`
+prefixes, case or spacing (Outlook drops or trims `References`, so headers can't identify a thread). A
+new subject starts a fresh conversation; skills and memory carry over. Replies, Cc and the 90 s outbox
+follow the mail being answered, so two threads from one sender never share a reply.
+Patch 0011 stops the misleading "Docker MEDIA path did not resolve" warning for files that already
+exist on the host, such as the `cache/documents` path that `sandbox_to_drive` returns.
+Patch 0012 raises a desktop notification (`notify-send`) once the inbox has been unreachable for
+`EMAIL_INBOX_ALERT_MINUTES` (default 10), and another when it is back. It also sends the sender one
+short "still working" note in the thread when no reply has gone out `EMAIL_ACK_AFTER_MINUTES` (default
+10, 0 = off) after their email arrived.
+File delivery no longer depends on the model: files the agent writes to `/workspace/out/` are saved to
+the drive and attached to the email reply when the turn ends (beardrive `collect_outputs`, run from the
+learning plugin's reply transform), then moved to `/workspace/sent/` so a later reply doesn't resend them.
+`sandbox_to_drive` now overwrites a same-name file by default (atomically; `bdrive restore` brings back
+the old version) instead of piling up `name (2).ext` copies; `on_exists: rename` or `fail` keep the old
+behaviour. `drive_save_attachment` (inbound attachments) still never overwrites.
 The learning plugin also guards file delivery, since the model ignored the SOUL rules for it
 (email tasks, 27 and 28 Oct): `mailguard.py` blocks `send_email` to the sender being answered and any
 `MEDIA:` line typed into a `send_email` body, and the verifier fails a reply when a file was

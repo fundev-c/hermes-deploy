@@ -478,15 +478,31 @@ def test_drive_to_sandbox_size_cap(mount, box, monkeypatch):
     assert "limit" in refused(tools.drive_to_sandbox({"path": "sales.csv"}, **CALL))
 
 
-def test_sandbox_to_drive_saves_and_never_overwrites(mount, box, as_sender):
+def test_sandbox_to_drive_overwrites_by_default(mount, box, as_sender):
+    """A redo replaces the earlier output instead of piling up 'result (2).csv' copies."""
     as_sender("alice@example.com")
     (box.root / "workspace" / "result.csv").write_text("n\n25544\n")
-    assert ok(tools.sandbox_to_drive({"source": "/workspace/result.csv"}, **CALL))["saved"] == "result.csv"
+    first = ok(tools.sandbox_to_drive({"source": "/workspace/result.csv"}, **CALL))
+    assert first["saved"] == "result.csv" and "overwrote" not in first
     assert (mount / "result.csv").read_text() == "n\n25544\n"
     (box.root / "workspace" / "result.csv").write_text("changed")
-    assert "already exists" in refused(tools.sandbox_to_drive({"source": "result.csv"}, **CALL))
-    assert (mount / "result.csv").read_text() == "n\n25544\n"
+    again = ok(tools.sandbox_to_drive({"source": "result.csv"}, **CALL))
+    assert again["saved"] == "result.csv" and again["overwrote"] is True
+    assert (mount / "result.csv").read_text() == "changed"
+    assert not [p for p in mount.iterdir() if p.name.endswith(".replace")]
+    assert "already exists" in refused(tools.sandbox_to_drive({"source": "result.csv", "on_exists": "fail"}, **CALL))
     assert ok(tools.sandbox_to_drive({"source": "result.csv", "on_exists": "rename"}, **CALL))["saved"] == "result (2).csv"
+    assert "on_exists" in refused(tools.sandbox_to_drive({"source": "result.csv", "on_exists": "clobber"}, **CALL))
+
+
+def test_sandbox_to_drive_never_overwrites_read_only_or_folders(mount, box, as_sender):
+    as_sender("alice@example.com")
+    (box.root / "workspace" / "r.txt").write_text("x")
+    (mount / ".bdriveignore").write_text("keep")
+    (mount / "reports").mkdir()
+    assert "reserved" in refused(tools.sandbox_to_drive({"source": "r.txt", "name": ".bdriveignore"}, **CALL))
+    assert "folder" in refused(tools.sandbox_to_drive({"source": "r.txt", "name": "reports"}, **CALL))
+    assert (mount / ".bdriveignore").read_text() == "keep" and (mount / "reports").is_dir()
 
 
 def test_sandbox_to_drive_refuses_sources_outside_workspace(mount, box, as_sender):
@@ -524,3 +540,64 @@ def test_sandbox_to_drive_stages_an_email_attachment_in_the_document_cache(mount
     staged = Path(d["attach"][len("MEDIA:"):])
     assert staged.parent == get_document_cache_dir() and staged.read_bytes() == b"PK\x03\x04data"
     assert " " not in staged.name  # a MEDIA path must survive the reply parser
+
+
+class OutBox(FakeSandbox):
+    """FakeSandbox that also answers collect_outputs' find and mv commands."""
+
+    def execute(self, command, cwd="", stdin_data=None, **kw):
+        import shlex
+        if command.startswith("find "):
+            out = self.root / "workspace" / "out"
+            names = sorted(p.name for p in out.iterdir() if p.is_file()) if out.exists() else []
+            return {"returncode": 0, "output": "".join(f"{n}\n" for n in names)}
+        if command.startswith("mkdir -p"):
+            src = shlex.split(command.split("mv -f", 1)[1])[0]
+            sent = self.root / "workspace" / "sent"
+            sent.mkdir(parents=True, exist_ok=True)
+            self._host(src).rename(sent / Path(src).name)
+            return {"returncode": 0, "output": ""}
+        return super().execute(command, cwd, stdin_data, **kw)
+
+
+@pytest.fixture
+def outbox(tmp_path, monkeypatch):
+    import tools.terminal_scope as ts
+    import tools.terminal_tool_lifecycle as tt
+    b = OutBox(tmp_path / "container")
+    (b.root / "workspace" / "out").mkdir(parents=True)
+    monkeypatch.setattr(tools, "_sandbox_env", lambda task_id: b)
+    monkeypatch.setattr(ts, "terminal_env", lambda key: "docker")
+    monkeypatch.setattr(tt, "get_active_env", lambda task_id: b if task_id == "s1" else None)
+    return b
+
+
+def test_collect_outputs_saves_overwrites_attaches_and_moves(mount, outbox, as_sender):
+    as_sender("alice@example.com")
+    out = outbox.root / "workspace" / "out"
+    (out / "Result Book.xlsx").write_bytes(b"PK new")
+    (out / "notes.csv").write_text("a\n1\n")
+    (mount / "Result Book.xlsx").write_bytes(b"PK old")
+    lines = tools.collect_outputs("s1")
+    assert len(lines) == 2 and all(line.startswith("MEDIA:") for line in lines)
+    assert (mount / "Result Book.xlsx").read_bytes() == b"PK new" and (mount / "notes.csv").exists()
+    assert not list(out.iterdir()) and {p.name for p in (outbox.root / "workspace" / "sent").iterdir()} == {
+        "Result Book.xlsx", "notes.csv"}
+    assert tools.collect_outputs("s1") == []  # a later reply in the session does not resend them
+
+
+def test_collect_outputs_skips_files_the_reply_already_attaches(mount, outbox, as_sender):
+    as_sender("alice@example.com")
+    (outbox.root / "workspace" / "out" / "Result Book.xlsx").write_bytes(b"PK")
+    assert tools.collect_outputs("s1", already_attached=["Result_Book.xlsx"]) == []
+    assert not (outbox.root / "workspace" / "out" / "Result Book.xlsx").exists()
+
+
+def test_collect_outputs_never_starts_a_sandbox_or_runs_off_docker(mount, outbox, as_sender, monkeypatch):
+    as_sender("alice@example.com")
+    (outbox.root / "workspace" / "out" / "r.csv").write_text("x")
+    assert tools.collect_outputs("another-session") == []
+    import tools.terminal_scope as ts
+    monkeypatch.setattr(ts, "terminal_env", lambda key: "local")
+    assert tools.collect_outputs("s1") == []
+    assert (outbox.root / "workspace" / "out" / "r.csv").exists()
