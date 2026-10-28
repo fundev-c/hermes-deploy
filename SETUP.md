@@ -73,6 +73,7 @@ git apply         "$R\hermes-agent-patches\0005-pre-verify-on-platforms.patch"
 git apply         "$R\hermes-agent-patches\0006-containment-web-contract.patch"
 git apply         "$R\hermes-agent-patches\0007-email-outbox-batching.patch"
 git apply         "$R\hermes-agent-patches\0008-email-reply-cc-approved-recipients.patch"
+git apply         "$R\hermes-agent-patches\0009-email-attachment-names.patch"
 ```
 
 Patch 0003 makes a multiplexed gateway cache a named profile's email attachments under that
@@ -90,6 +91,12 @@ recipient are collected and sent as one email per window; an attachment carries 
 Patch 0008 Cc's a reply to the inbound mail's other To/Cc recipients, but only those on
 `EMAIL_ALLOWED_USERS` or the receive-only `EMAIL_CC_RECIPIENTS` (team .env). Cc recipients get the reply;
 only `EMAIL_ALLOWED_USERS` can instruct the agent. Run `sync_allowlist.py` after changing either list.
+Patch 0009 names reply attachments without beardrive's `out_<id>_` cache prefix and quotes the
+filename, so `out_e02bd77e_Keyword_normalized.xlsx` arrives as `Keyword_normalized.xlsx`.
+The learning plugin also guards file delivery, since the model ignored the SOUL rules for it
+(email tasks, 27 and 28 Oct): `mailguard.py` blocks `send_email` to the sender being answered and any
+`MEDIA:` line typed into a `send_email` body, and the verifier fails a reply when a file was
+saved but neither a reply `MEDIA:` line nor a `send_email` with attachments delivered it.
 The team config also sets `display.platforms.email` to the quiet tier (no tool progress, interim
 messages or heartbeats): the global `display.*` keys otherwise override email's quiet default and
 every progress update became its own email.

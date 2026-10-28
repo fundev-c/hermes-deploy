@@ -40,6 +40,9 @@ _CLAIMS_FILE = re.compile(r"\b(attached|attaching|saved (it|them|the \w+)? ?(to|
 _WANTS_OUTPUT = re.compile(r"\b(make|create|generate|build|produce|export|prepare|send( me)?|give me)\b[^.?!]{0,60}"
                            r"\b(sheet|spreadsheet|file|csv|xlsx|excel|report|document|pdf|deck|one-pager)\b", re.I)
 _ATTACHMENT = re.compile(r"\[The user sent (a|an) (document|image|file)|\battach(ed|ment)\b", re.I)
+_CLAIMS_DELIVERY = re.compile(r"\b(attached|attaching|e-?mailed|sent (it|them|this|the \w+)|here (it )?is|"
+                              r"find (it|them|the \w+) (attached|below))\b", re.I)
+_MEDIA_LINE = re.compile(r"(?m)^\s*MEDIA:\s*(?!/workspace/)\S")
 _REFUSAL = re.compile(r"\b(i can(no|')t|i am unable|i'm unable|not able to|please (convert|send|resend|paste))\b", re.I)
 
 
@@ -71,7 +74,13 @@ def _tool_events(turn: List[dict]) -> List[Dict[str, Any]]:
             continue
         for tc in m.get("tool_calls") or []:
             fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-            ev = {"name": fn.get("name", "?"), "args": str(fn.get("arguments", ""))[:300], "result": "", "error": False}
+            raw = fn.get("arguments", "")
+            try:
+                parsed = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+            except (ValueError, TypeError):
+                parsed = {}
+            ev = {"name": fn.get("name", "?"), "args": str(raw)[:300], "result": "", "error": False,
+                  "attachments": bool(isinstance(parsed, dict) and str(parsed.get("attachments") or "").strip())}
             calls[str(tc.get("id"))] = ev
             order.append(ev)
         if m.get("role") == "tool":
@@ -123,6 +132,13 @@ def rule_problems(request: str, reply: str, events: List[Dict[str, Any]]) -> Lis
     if _CLAIMS_FILE.search(reply) and not saved:
         problems.append("The reply says a file was attached or saved to the drive, but no sandbox_to_drive or "
                         "drive_save_attachment call succeeded this turn.")
+    mailed = any(ev["name"].split("__")[-1] == "send_email" and ev.get("attachments") and not ev["error"]
+                 for ev in events)
+    if (saved and not _MEDIA_LINE.search(reply) and not mailed
+            and (_CLAIMS_DELIVERY.search(reply) or _WANTS_OUTPUT.search(request))):
+        problems.append(f"{saved[0]} was saved but never reached the sender: the reply has no MEDIA: line and no "
+                        "send_email with attachments succeeded. Put the 'attach' line that sandbox_to_drive "
+                        "returned on its own line in the reply.")
     if _WANTS_OUTPUT.search(request) and not saved and not _REFUSAL.search(reply):
         problems.append("The request asks for a file (sheet/report/document) but none was saved to the drive.")
     if events and events[-1]["error"] and events[-1]["name"] not in _SKIP_TOOLS:

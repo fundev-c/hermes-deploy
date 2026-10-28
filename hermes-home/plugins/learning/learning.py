@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import webguard
+from . import mailguard, webguard
 
 logger = logging.getLogger(__name__)
 
@@ -384,10 +384,18 @@ def on_post_tool_call(tool_name: str = "", result: Any = None, session_id: str =
 
 def on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
                      task_id: str = "", **_: Any) -> Optional[dict]:
-    """Block web_search / web_extract calls that would carry private data off the machine; log every one."""
+    """Block web_search / web_extract calls that would carry private data off the machine; log every one.
+    Also block send_email calls that would mail a file the wrong way (see mailguard)."""
+    args = args if isinstance(args, dict) else {}
+    if mailguard.is_send_email(tool_name):
+        from gateway.session_context import get_session_env
+        reason = mailguard.problem(args, get_session_env("HERMES_SESSION_PLATFORM", ""),
+                                   get_session_env("HERMES_SESSION_CHAT_ID", ""))
+        if reason:
+            logger.info("mailguard blocked send_email: %s", reason)
+        return {"action": "block", "message": mailguard.block_message(reason)} if reason else None
     if tool_name not in webguard.WEB_TOOLS:
         return None
-    args = args if isinstance(args, dict) else {}
     try:
         reason = webguard.problem(session_id, tool_name, args)
     except Exception:  # fail closed: an unexplained guard error blocks the call

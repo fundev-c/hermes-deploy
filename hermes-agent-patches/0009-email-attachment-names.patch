@@ -1,0 +1,46 @@
+--- a/plugins/platforms/email/adapter.py
++++ b/plugins/platforms/email/adapter.py
+@@ -316,13 +316,17 @@
+     return attachments
+ 
+ 
++_DRIVE_OUT_PREFIX = re.compile(r"^out_[0-9a-f]{8}_")  # beardrive's sandbox_to_drive cache name
++
++
+ def _attach_file(msg: MIMEMultipart, path: Path, filename: str) -> None:
+-    """Attach *path* to *msg* as base64 application/octet-stream."""
++    """Attach *path* to *msg* as base64 application/octet-stream, named without the drive's
++    ``out_<id>_`` cache prefix and with the filename quoted (spaces, brackets, non-ASCII)."""
+     with open(path, "rb") as f:
+         part = MIMEBase("application", "octet-stream")
+         part.set_payload(f.read())
+         encoders.encode_base64(part)
+-        part.add_header("Content-Disposition", f"attachment; filename={filename}")
++        part.add_header("Content-Disposition", "attachment", filename=_DRIVE_OUT_PREFIX.sub("", filename) or filename)
+         msg.attach(part)
+ 
+ 
+--- /dev/null
++++ b/tests/gateway/test_email_attachment_name.py
+@@ -0,0 +1,21 @@
++"""Attachment names (hermes-deploy patch 0009): drop beardrive's out_<id>_ cache prefix, quote the name."""
++from email.mime.multipart import MIMEMultipart
++
++from plugins.platforms.email.adapter import _attach_file
++
++
++def attached_name(tmp_path, name):
++    p = tmp_path / name
++    p.write_bytes(b"x")
++    msg = MIMEMultipart()
++    _attach_file(msg, p, name)
++    return msg.get_payload()[0].get_filename()
++
++
++def test_drive_cache_prefix_is_dropped(tmp_path):
++    assert attached_name(tmp_path, "out_e02bd77e_Keyword_normalized.xlsx") == "Keyword_normalized.xlsx"
++
++
++def test_other_names_are_kept_and_quoted(tmp_path):
++    assert attached_name(tmp_path, "rental companies (2).xlsx") == "rental companies (2).xlsx"
++    assert attached_name(tmp_path, "out_report.pdf") == "out_report.pdf"

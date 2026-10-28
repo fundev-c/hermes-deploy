@@ -155,3 +155,33 @@ def test_judges_come_from_free_models_file_and_skip_the_worker(tmp_path, monkeyp
     assert V._judge_models() == V.JUDGE_MODELS
     monkeypatch.setattr(V, "FREE_MODELS_FILE", tmp_path / "missing.json")
     assert V._judge_models() == V.JUDGE_MODELS
+
+
+def _with_args(msgs, name, args, result):
+    msgs.append({"role": "assistant", "tool_calls": [{"id": "m1", "function": {"name": name, "arguments": json.dumps(args)}}]})
+    msgs.append({"role": "tool", "tool_call_id": "m1", "content": result})
+    return msgs
+
+
+REQ_NORMALIZE = "[The user sent a document: 'Keyword.xlsx'.]\nThe attached has to be normalized: first letter of each word uppercase."
+MAIL = "mcp__n8n_tools__send_email"
+ACCEPTED = json.dumps({"result": "[{\"accepted\": [\"x@corp.com\"]}]"})
+
+
+def test_saved_but_never_attached_fails():
+    """28 Oct regression: file saved, send_email with MEDIA: typed in the body, reply claims it was emailed."""
+    msgs = _with_args(turn(REQ_NORMALIZE, TERM_OK, SAVED), MAIL, {"to": "carol@corp.com", "body": "MEDIA:/c/out_x.xlsx"}, ACCEPTED)
+    v = V.verify(msgs, "Done. The normalized file has been saved to the shared drive and emailed back to you.")
+    assert v["verdict"] == "fail" and any("never reached the sender" in p for p in v["rules"])
+
+
+def test_file_sent_with_send_email_attachments_passes():
+    msgs = _with_args(turn(REQ_NORMALIZE, TERM_OK, SAVED), MAIL,
+                      {"to": "bob@corp.com", "body": "Hi Bob", "attachments": "MEDIA:/c/out_x.xlsx"}, ACCEPTED)
+    v = V.verify(msgs, "Done. I sent the normalized file to Bob as asked.")
+    assert v["verdict"] == "pass", v["rules"]
+
+
+def test_drive_only_save_is_not_flagged():
+    v = V.verify(turn("Put the cleaned list in the drive please.", TERM_OK, SAVED), "Saved it to the drive as x_CHECKED.xlsx.")
+    assert not any("never reached" in p for p in v["rules"])
