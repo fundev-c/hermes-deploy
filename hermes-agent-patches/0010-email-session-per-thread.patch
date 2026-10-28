@@ -1,0 +1,242 @@
+--- a/plugins/platforms/email/adapter.py
++++ b/plugins/platforms/email/adapter.py
+@@ -3,6 +3,7 @@
+ 
+ import asyncio
+ import email as email_lib
++import hashlib
+ from contextlib import contextmanager, suppress
+ import imaplib
+ import logging
+@@ -317,6 +318,16 @@
+ 
+ 
+ _DRIVE_OUT_PREFIX = re.compile(r"^out_[0-9a-f]{8}_")  # beardrive's sandbox_to_drive cache name
++_SUBJECT_PREFIX = re.compile(r"^\s*(?:(?:re|fwd?|aw|wg|sv|antw)(?:\[\d+\])?\s*:\s*|\[[^\]]*\]\s*)+", re.I)
++_MSG_CONTEXT_MAX = 500
++
++
++def _thread_key(subject: str, message_id: str) -> str:
++    """Session thread of an email (hermes-deploy patch 0010): the subject without Re:/Fwd:/[tag] prefixes, case
++    or spacing, so "Upper case" and "RE: RE: Upper case" share one session. Outlook drops or trims
++    References/In-Reply-To, so headers cannot identify a thread here. A blank subject is its own thread."""
++    norm = " ".join(_SUBJECT_PREFIX.sub("", subject or "").lower().split())
++    return "t" + hashlib.sha1((norm or f"msg:{message_id}").encode()).hexdigest()[:10]
+ 
+ 
+ def _attach_file(msg: MIMEMultipart, path: Path, filename: str) -> None:
+@@ -363,8 +374,8 @@
+             self._batch_seconds = float(extra.get("batch_seconds") or _get_secret("EMAIL_BATCH_SECONDS", "") or 0)
+         except ValueError:
+             self._batch_seconds = 0.0
+-        self._outbox: Dict[str, List[Tuple[str, Optional[str]]]] = {}
+-        self._outbox_tasks: Dict[str, asyncio.Task] = {}
++        self._outbox: Dict[Tuple[str, str], List[Tuple[str, Optional[str]]]] = {}
++        self._outbox_tasks: Dict[Tuple[str, str], asyncio.Task] = {}
+         # Require an authenticated From: domain (SPF/DKIM/DMARC) before trusting it for authorization
+         # (GHSA-rxqh-5572-8m77). Default ON; opt out via require_authenticated_sender: false / EMAIL_TRUST_FROM_HEADER=true.
+         if "require_authenticated_sender" in extra:
+@@ -381,6 +392,9 @@
+         # Track the last IMAP fetch attempt so the poll loop can distinguish "checked, nothing new" from
+         # "the check itself failed" (#80016).
+         self._thread_context: Dict[str, Dict[str, str]] = {}
++        # inbound Message-ID -> that mail's reply context and thread (patch 0010): one sender can have several
++        # threads in flight, so a reply is matched to the mail it answers, not to the sender's latest mail.
++        self._msg_context: Dict[str, Dict[str, Any]] = {}
+         logger.info("[Email] Adapter initialized for %s", self._address)
+ 
+     def _trim_seen_uids(self) -> None:
+@@ -507,8 +521,8 @@
+         self._running = False
+         await cancel_task(self._poll_task)
+         self._poll_task = None
+-        for chat_id in list(getattr(self, "_outbox", {})):  # never drop staged replies on shutdown/reconnect
+-            await self._flush_outbox(chat_id)
++        for box in list(getattr(self, "_outbox", {})):  # never drop staged replies on shutdown/reconnect
++            await self._flush_outbox(box)
+         logger.info("[Email] Disconnected.")
+ 
+     async def _poll_loop(self) -> None:
+@@ -670,14 +684,21 @@
+         # DOCUMENT wins over PHOTO for mixed attachments: run.py keys image handling off the per-path mime type regardless
+         # of message_type, but document-context injection gates strictly on MessageType.DOCUMENT — so DOCUMENT surfaces both.
+         kinds = {att["type"] for att in attachments}
+-        self._thread_context[sender_addr] = {"subject": subject, "message_id": msg_data["message_id"],
+-                                             "cc": self._reply_cc(sender_addr, msg_data.get("other_recipients", []))}
++        thread_id = _thread_key(subject, msg_data["message_id"])
++        ctx = {"subject": subject, "message_id": msg_data["message_id"],
++               "cc": self._reply_cc(sender_addr, msg_data.get("other_recipients", [])), "thread_id": thread_id}
++        self._thread_context[sender_addr] = ctx
++        if msg_data["message_id"]:
++            msg_context = self.__dict__.setdefault("_msg_context", {})
++            msg_context[msg_data["message_id"]] = ctx
++            while len(msg_context) > _MSG_CONTEXT_MAX:
++                msg_context.pop(next(iter(msg_context)))
+         name = msg_data["sender_name"] or sender_addr
+         event = MessageEvent(
+             text=text or "(empty email)", message_id=msg_data["message_id"],
+             message_type=MessageType.DOCUMENT if "document" in kinds else MessageType.PHOTO if "image" in kinds else MessageType.TEXT,
+             source=self.build_source(chat_id=sender_addr, chat_name=name, chat_type="dm", user_id=sender_addr, user_name=name,
+-                                     message_id=msg_data["message_id"]),
++                                     thread_id=thread_id, message_id=msg_data["message_id"]),
+             media_urls=[att["path"] for att in attachments], media_types=[att["media_type"] for att in attachments],
+             reply_to_message_id=msg_data["in_reply_to"] or None)
+         logger.info("[Email] New message from %s: %s", sender_addr, subject)
+@@ -694,41 +715,51 @@
+     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+         """Send an email reply to the given address (staged into the outbox when batch_seconds > 0)."""
+         if getattr(self, "_batch_seconds", 0) > 0:
+-            self._outbox.setdefault(chat_id, []).append((content or "", reply_to))
+-            task = self._outbox_tasks.get(chat_id)
++            box = self._box(chat_id, reply_to, metadata)
++            self._outbox.setdefault(box, []).append((content or "", reply_to))
++            task = self._outbox_tasks.get(box)
+             if task is None or task.done():
+-                self._outbox_tasks[chat_id] = asyncio.get_running_loop().create_task(self._flush_after(chat_id))
++                self._outbox_tasks[box] = asyncio.get_running_loop().create_task(self._flush_after(box))
+             return SendResult(success=True)
+         return await self._run_send(self._send_email, (chat_id, content, reply_to), "[Email] Send failed to %s: %s", chat_id)
+ 
+-    def _take_outbox(self, chat_id: str) -> Tuple[str, Optional[str]]:
+-        """Pop the staged texts for *chat_id*: (bodies joined in order, first reply-to id)."""
+-        task = getattr(self, "_outbox_tasks", {}).pop(chat_id, None)
++    def _box(self, chat_id: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
++        """Outbox key (patch 0010): one batch per recipient AND thread, so two threads never share an email."""
++        thread = (metadata or {}).get("thread_id") or getattr(self, "_msg_context", {}).get(reply_to or "", {}).get("thread_id")
++        return chat_id, str(thread or "")
++
++    def _take_outbox(self, box: Any) -> Tuple[str, Optional[str]]:
++        """Pop the staged texts for *box* (``(recipient, thread)``, or a bare recipient for its
++        thread-less batch): (bodies joined in order, first reply-to id)."""
++        box = (box, "") if isinstance(box, str) else box
++        task = getattr(self, "_outbox_tasks", {}).pop(box, None)
+         if task is not None and task is not asyncio.current_task() and not task.done():
+             task.cancel()
+         parts, reply_to = [], None
+-        for text, rid in getattr(self, "_outbox", {}).pop(chat_id, []):
++        for text, rid in getattr(self, "_outbox", {}).pop(box, []):
+             reply_to = reply_to or rid
+             text = text.strip()
+             if text and (not parts or parts[-1] != text):
+                 parts.append(text)
+         return "\n\n".join(parts), reply_to
+ 
+-    async def _flush_after(self, chat_id: str) -> None:
++    async def _flush_after(self, box: Any) -> None:
+         try:
+             await asyncio.sleep(self._batch_seconds)
+         except asyncio.CancelledError:
+             return
+-        await self._flush_outbox(chat_id)
++        await self._flush_outbox(box)
+ 
+-    async def _flush_outbox(self, chat_id: str, _retry: bool = True) -> None:
+-        body, reply_to = self._take_outbox(chat_id)
++    async def _flush_outbox(self, box: Any, _retry: bool = True) -> None:
++        box = (box, "") if isinstance(box, str) else box
++        chat_id = box[0]
++        body, reply_to = self._take_outbox(box)
+         if not body:
+             return
+         result = await self._run_send(self._send_email, (chat_id, body, reply_to), "[Email] Staged send failed to %s: %s", chat_id)
+         if not result.success and _retry:  # one retry on the next window, ahead of anything newer
+-            self._outbox.setdefault(chat_id, []).insert(0, (body, reply_to))
+-            self._outbox_tasks[chat_id] = asyncio.get_running_loop().create_task(self._flush_after(chat_id))
++            self._outbox.setdefault(box, []).insert(0, (body, reply_to))
++            self._outbox_tasks[box] = asyncio.get_running_loop().create_task(self._flush_after(box))
+ 
+     def _reply_cc(self, sender_addr: str, others: List[str]) -> List[str]:
+         """Who to Cc on the reply (hermes-deploy patch 0008): the inbound mail's other To/Cc recipients, but only those
+@@ -746,7 +777,8 @@
+     def _new_reply(self, to_addr: str, body: str, reply_to_msg_id: Optional[str] = None, *,
+                    attach_empty_body: bool = False) -> Tuple[MIMEMultipart, str, str]:
+         """Build a threaded reply skeleton. Returns ``(msg, msg_id, subject)``."""
+-        msg, ctx = MIMEMultipart(), self._thread_context.get(to_addr, {})
++        msg = MIMEMultipart()
++        ctx = getattr(self, "_msg_context", {}).get(reply_to_msg_id or "") or self._thread_context.get(to_addr, {})
+         subject = ctx.get("subject", "Hermes Agent")
+         if not subject.startswith("Re:"):
+             subject = f"Re: {subject}"
+@@ -818,7 +850,7 @@
+                 logger.warning("[Email] Skipping missing image: %s", local_path)
+         if not local_paths and not body_parts:
+             return SendResult(success=False, error="no valid images in batch")
+-        staged, _ = self._take_outbox(chat_id)
++        staged, _ = self._take_outbox(self._box(chat_id, None, metadata))
+         if staged:
+             body_parts.insert(0, staged)
+         try:
+@@ -837,7 +869,7 @@
+     async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
+                             file_name: Optional[str] = None, reply_to: Optional[str] = None, **kwargs) -> SendResult:
+         """Send a file as an email attachment (with any staged text for this recipient in the body)."""
+-        staged, staged_reply = self._take_outbox(chat_id)
++        staged, staged_reply = self._take_outbox(self._box(chat_id, reply_to, kwargs.get("metadata")))
+         body = "\n\n".join(p for p in (staged, (caption or "").strip()) if p)
+         return await self._run_send(self._send_email_with_attachment, (chat_id, body, file_path, file_name, reply_to or staged_reply),
+                                     "[Email] Send document failed: %s")
+--- /dev/null
++++ b/tests/gateway/test_email_threads.py
+@@ -0,0 +1,62 @@
++"""One session per email thread (hermes-deploy patch 0010): the thread is the subject without Re:/Fwd:
++prefixes; replies, Cc and the outbox follow the mail being answered, not the sender's latest mail."""
++import asyncio
++from unittest.mock import AsyncMock, MagicMock
++
++import plugins.platforms.email.adapter as mod
++from gateway.session import build_session_key
++from plugins.platforms.email.adapter import EmailAdapter, _thread_key
++
++
++def test_replies_and_forwards_share_the_thread():
++    k = _thread_key("Upper case", "<a@x>")
++    assert k == _thread_key("RE: RE: Upper case", "<b@x>") == _thread_key("Re:  upper   CASE ", "<c@x>")
++    assert k == _thread_key("FW: [EXTERNAL] RE: Upper case", "<d@x>") == _thread_key("AW[2]: Upper case", "<e@x>")
++    assert k != _thread_key("Rental scraping", "<a@x>")
++    assert _thread_key("", "<a@x>") != _thread_key("", "<b@x>")
++
++
++def make(monkeypatch, batch: float = 0) -> EmailAdapter:
++    monkeypatch.setattr(mod, "_get_secret", lambda name, default="": default)
++    a = EmailAdapter.__new__(EmailAdapter)
++    a.__init__(MagicMock(extra={"address": "bot@gmail.com", "batch_seconds": batch}))
++    a._sender_accepted = lambda *args: True
++    a.handle_message = AsyncMock()
++    a._send_email = MagicMock(return_value="<id@x>")
++    return a
++
++
++def inbound(a, subject, mid):
++    asyncio.run(a._dispatch_message({"sender_addr": "carol@corp.com", "sender_name": "Carol", "subject": subject,
++                                     "body": "hi", "attachments": [], "message_id": mid, "in_reply_to": ""}))
++    return a.handle_message.call_args.args[0]
++
++
++def test_each_thread_gets_its_own_session(monkeypatch):
++    a = make(monkeypatch)
++    first, reply, other = (inbound(a, s, m) for s, m in (("Upper case", "<1@x>"), ("RE: Upper case", "<2@x>"),
++                                                         ("Rental scraping", "<3@x>")))
++    keys = [build_session_key(e.source) for e in (first, reply, other)]
++    assert keys[0] == keys[1] != keys[2]
++    assert all(k.startswith("agent:main:email:dm:carol@corp.com:t") for k in keys)
++
++
++def test_reply_uses_the_answered_mail_not_the_latest(monkeypatch):
++    a = make(monkeypatch)
++    inbound(a, "Upper case", "<1@x>")
++    inbound(a, "Rental scraping", "<3@x>")  # arrives while the first is still being worked on
++    msg, _, subject = a._new_reply("carol@corp.com", "done", "<1@x>")
++    assert subject == "Re: Upper case" and msg["In-Reply-To"] == "<1@x>"
++
++
++def test_outbox_never_merges_two_threads(monkeypatch):
++    a = make(monkeypatch, batch=0.05)
++    one, two = inbound(a, "Upper case", "<1@x>"), inbound(a, "Rental scraping", "<3@x>")
++
++    async def go():
++        await a.send("carol@corp.com", "keywords done", reply_to="<1@x>", metadata={"thread_id": one.source.thread_id})
++        await a.send("carol@corp.com", "rentals done", reply_to="<3@x>", metadata={"thread_id": two.source.thread_id})
++        await asyncio.sleep(0.15)
++    asyncio.run(go())
++    sent = sorted((c.args[1], c.args[2]) for c in a._send_email.call_args_list)
++    assert sent == [("keywords done", "<1@x>"), ("rentals done", "<3@x>")]

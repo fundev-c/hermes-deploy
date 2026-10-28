@@ -1,0 +1,47 @@
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -1058,7 +1058,8 @@
+                for prefix in (container_root.as_posix().rstrip("/") or "/",)
+                if candidate_posix == prefix or candidate_posix.startswith(prefix + "/")]
+     if not matched:
+-        _warn_unresolved_docker_media(candidate, session_key, "no mounted prefix matches")
++        if not os.path.exists(candidate):  # an existing host path (beardrive's cache/documents) needs no translation
++            _warn_unresolved_docker_media(candidate, session_key, "no mounted prefix matches")
+         return None
+     for host_root, container_root, _score in sorted(matched, key=lambda m: -m[2]):
+         translated = _resolve_path(host_root / candidate.relative_to(container_root), strict=True)
+--- /dev/null
++++ b/tests/gateway/test_media_host_path_warning.py
+@@ -0,0 +1,32 @@
++"""Docker MEDIA translation (hermes-deploy patch 0011): an existing host path, such as the
++cache/documents file sandbox_to_drive returns, is not a sandbox path and logs no warning."""
++import logging
++from pathlib import Path
++
++import gateway.platforms.base as base
++
++
++def setup(monkeypatch, tmp_path):
++    monkeypatch.setattr(base, "_docker_env_active", lambda: True)
++    monkeypatch.setattr(base, "_parse_docker_volume_mounts", lambda: [])
++    monkeypatch.setattr(base, "_cache_dir_container_mounts",
++                        lambda: [(tmp_path / "cache", Path("/root/.hermes/cache/documents"))])
++    monkeypatch.setattr(base, "_default_docker_workspace_host_roots", lambda key="": [])
++    monkeypatch.setattr(base, "_docker_persistent_sandbox_roots", lambda key, kind: [])
++
++
++def test_existing_host_path_is_quiet(monkeypatch, tmp_path, caplog):
++    setup(monkeypatch, tmp_path)
++    host_file = tmp_path / "out_e02bd77e_Keyword_normalized.xlsx"
++    host_file.write_bytes(b"x")
++    with caplog.at_level(logging.WARNING):
++        assert base._translate_docker_container_media_path(host_file) is None
++        assert base.validate_media_delivery_path(str(host_file)) == str(host_file)
++    assert "did not resolve" not in caplog.text
++
++
++def test_missing_unmounted_path_still_warns(monkeypatch, tmp_path, caplog):
++    setup(monkeypatch, tmp_path)
++    with caplog.at_level(logging.WARNING):
++        assert base._translate_docker_container_media_path(Path("/data/report.xlsx")) is None
++    assert "no mounted prefix matches" in caplog.text

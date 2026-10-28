@@ -1,0 +1,8 @@
+[Unit]
+Description=Push EMAIL_ALLOWED_USERS + EMAIL_CC_RECIPIENTS from the team .env into the n8n send guard
+After=n8n-hermes.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.hermes/n8n-workflows
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python %h/.hermes/n8n-workflows/sync_allowlist.py

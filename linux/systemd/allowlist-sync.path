@@ -1,0 +1,8 @@
+[Unit]
+Description=Re-sync the n8n send_email allowlist whenever the team .env changes
+
+[Path]
+PathChanged=%h/.hermes/profiles/team/.env
+
+[Install]
+WantedBy=default.target
