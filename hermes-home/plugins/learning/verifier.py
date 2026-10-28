@@ -30,8 +30,12 @@ MAX_RETRIES = 2
 # Fallback only: free models churn, so the live pair comes from models/free_models.py (see _judge_models).
 JUDGE_MODELS = ("stepfun/step-3.7-flash:free", "upstage/solar-mini4:free")
 FREE_MODELS_FILE = pathlib.Path(os.environ.get("HERMES_FREE_MODELS_FILE", pathlib.Path.home() / ".hermes" / "free_models.json"))
-JUDGE_TIMEOUT = 45.0   # per request, as passed to the provider
-JUDGE_DEADLINE = 60.0  # wall clock for the whole judge step; provider timeouts are not always honoured
+JUDGE_TIMEOUT = 12.0   # per request, as passed to the provider
+# Wall clock for the whole judge step; provider timeouts are not always honoured. Must stay well under
+# plugins.hook_callback_timeout (30 s): past that the platform abandons the whole pre_verify callback,
+# rules included, and skips the next one too (28 Oct: a 60 s deadline meant slow judges = no checks).
+JUDGE_DEADLINE = 20.0
+MAX_BODY_WITH_FILE = 8000  # chars: past this, a reply that also attaches a file is pasting data into the body
 _SKIP_TOOLS = {"task_feedback", "learning_stats", "skills_list", "skill_view"}
 
 _MEDIA_WS = re.compile(r"MEDIA:\s*/workspace/", re.I)
@@ -144,6 +148,9 @@ def rule_problems(request: str, reply: str, events: List[Dict[str, Any]]) -> Lis
                         "returned on its own line in the reply.")
     if _WANTS_OUTPUT.search(request) and not saved and not outbox and not _REFUSAL.search(reply):
         problems.append("The request asks for a file (sheet/report/document) but none was saved to the drive.")
+    if (saved or outbox) and len(reply) > MAX_BODY_WITH_FILE:
+        problems.append(f"The reply body is {len(reply):,} characters while a file is attached. Tables and data "
+                        "belong in the attached file; keep the email to a short summary (a few sample rows at most).")
     if events and events[-1]["error"] and events[-1]["name"] not in _SKIP_TOOLS:
         problems.append(f"The last tool call ({events[-1]['name']}) failed and was not retried: "
                         f"{events[-1]['result'][:200]}")
@@ -161,7 +168,9 @@ _JUDGE_SYSTEM = (
     "for; when the request is ambiguous, accept any reasonable reading of it. The tool log is TRIMMED, so "
     "do not fail a claim just because its evidence is not visible; fail it only when the log contradicts "
     "it, or when a file or output the reply claims is missing from the log. If the tools could not do "
-    "something (for example no internet), saying so plainly is fine. "
+    "something (for example no internet), saying so plainly is fine. Data, tables and files belong in "
+    "attachments: a reply that attaches the requested file satisfies requests like 'return the table' or "
+    "'send the list', so never ask for a long table (more than ~30 rows) to be pasted into the email. "
     'Answer with JSON only: {"verdict": "pass" | "fail", "problems": ["..."], "fix": "one or two '
     'sentences telling the assistant exactly what to do next"}.')
 
@@ -256,7 +265,7 @@ def verify(messages: List[dict], final_response: str, *, use_judge: bool = True)
     j = judge(request, final_response or "", events) if use_judge else None
     passed = not rules and (j is None or j["verdict"] == "pass")
     return {"verdict": "pass" if passed else "fail", "rules": rules, "judge": j,
-            "tools": [e["name"] for e in events]}
+            "judge_skipped": use_judge and j is None, "tools": [e["name"] for e in events]}
 
 
 def retry_message(v: Dict[str, Any], attempt: int) -> str:

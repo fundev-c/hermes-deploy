@@ -1,0 +1,143 @@
+--- a/plugins/platforms/email/adapter.py
++++ b/plugins/platforms/email/adapter.py
+@@ -6,6 +6,7 @@
+ import hashlib
+ from contextlib import contextmanager, suppress
+ import imaplib
++import json
+ import logging
+ import os
+ import re
+@@ -371,6 +372,24 @@
+     _inbox_down_since: Dict[str, float] = {}
+     _inbox_alerted: set = set()
+ 
++    def _activity(self, kind: str, **fields: Any) -> None:
++        """Append one line to <owner profile>/logs/email.jsonl (hermes-deploy patch 0013): mail in, mail out,
++        still-working notes and inbox outages, for the daily digest. Never raises."""
++        try:
++            owner = getattr(self, "_owner_profile", None)
++            if owner:
++                from hermes_cli.profiles import get_profile_dir
++                home = Path(get_profile_dir(owner))
++            else:
++                from hermes_constants import get_hermes_home
++                home = Path(get_hermes_home())
++            path = home / "logs" / "email.jsonl"
++            path.parent.mkdir(parents=True, exist_ok=True)
++            with open(path, "a", encoding="utf-8") as f:
++                f.write(json.dumps({"ts": time.time(), "kind": kind, **fields}, ensure_ascii=False) + "\n")
++        except Exception:
++            logger.debug("[Email] could not record %s activity", kind, exc_info=True)
++
+     def _inbox_failed(self) -> None:
+         now = time.time()
+         since = self._inbox_down_since.setdefault(self._address, now)
+@@ -383,6 +402,8 @@
+ 
+     def _inbox_ok(self) -> None:
+         since = self._inbox_down_since.pop(self._address, None)
++        if since and time.time() - since >= 60:
++            self._activity("outage", minutes=round((time.time() - since) / 60, 1))
+         if self._address in self._inbox_alerted:
+             self._inbox_alerted.discard(self._address)
+             minutes = int((time.time() - since) // 60) if since else 0
+@@ -751,6 +772,7 @@
+             media_urls=[att["path"] for att in attachments], media_types=[att["media_type"] for att in attachments],
+             reply_to_message_id=msg_data["in_reply_to"] or None)
+         logger.info("[Email] New message from %s: %s", sender_addr, subject)
++        self._activity("in", sender=sender_addr, subject=subject, thread=thread_id, attachments=len(attachments))
+         self._arm_ack(msg_data["message_id"], sender_addr, thread_id)
+         await self.handle_message(event)
+ 
+@@ -889,6 +911,20 @@
+                 smtp.quit()
+             except Exception:
+                 smtp.close()
++        self._record_sent(msg)
++
++    def _record_sent(self, msg: MIMEMultipart) -> None:
++        """Patch 0013: say what actually went out (Gmail's Sent folder was the only record of attachments)."""
++        files = [(p.get_filename(), len(p.get_payload(decode=True) or b"")) for p in msg.walk() if p.get_filename()]
++        text = " ".join((p.get_payload(decode=True) or b"").decode("utf-8", "ignore")
++                        for p in msg.walk() if p.get_content_type() == "text/plain")
++        kind = "ack" if _ACK_TEXT in text else "out"
++        cc = [a.strip() for a in str(msg.get("Cc") or "").split(",") if a.strip()]
++        logger.info("[Email] Sent %s to %s%s: %r, %s", "still-working note" if kind == "ack" else "email", msg["To"],
++                    f" (cc {', '.join(cc)})" if cc else "", str(msg["Subject"]),
++                    ", ".join(f"{n} ({size:,} B)" for n, size in files) or "no attachments")
++        self._activity(kind, to=str(msg["To"]), cc=cc, subject=str(msg["Subject"]),
++                       files=[{"name": n, "bytes": size} for n, size in files], chars=len(text))
+ 
+     def _send_email(self, to_addr: str, body: str, reply_to_msg_id: Optional[str] = None) -> str:
+         """Send an email via SMTP. Runs in executor thread."""
+--- /dev/null
++++ b/tests/gateway/test_email_activity_log.py
+@@ -0,0 +1,67 @@
++"""Email activity log (hermes-deploy patch 0013): what came in, what went out (with attachment
++names and sizes), still-working notes and inbox outages land in logs/email.jsonl."""
++import asyncio
++import json
++from email.mime.multipart import MIMEMultipart
++from email.mime.text import MIMEText
++from unittest.mock import AsyncMock, MagicMock
++
++import pytest
++
++import plugins.platforms.email.adapter as mod
++from plugins.platforms.email.adapter import EmailAdapter, _attach_file
++
++
++@pytest.fixture
++def home(tmp_path, monkeypatch):
++    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
++    monkeypatch.setattr(mod, "_get_secret", lambda name, default="": default)
++    return tmp_path
++
++
++def rows(home):
++    p = home / "logs" / "email.jsonl"
++    return [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
++
++
++def make() -> EmailAdapter:
++    a = EmailAdapter.__new__(EmailAdapter)
++    a.__init__(MagicMock(extra={"address": "bot@gmail.com"}))
++    return a
++
++
++def test_sent_email_records_recipients_and_attachments(home, tmp_path):
++    a = make()
++    f = tmp_path / "out_e02bd77e_Keyword_normalized.xlsx"
++    f.write_bytes(b"x" * 1234)
++    msg = MIMEMultipart()
++    msg["To"], msg["Cc"], msg["Subject"] = "carol@corp.com", "dave@corp.com", "Re: Upper case"
++    msg.attach(MIMEText("Done, file attached.", "plain", "utf-8"))
++    _attach_file(msg, f, f.name)
++    a._record_sent(msg)
++    (r,) = rows(home)
++    assert r["kind"] == "out" and r["to"] == "carol@corp.com" and r["cc"] == ["dave@corp.com"]
++    assert r["files"] == [{"name": "Keyword_normalized.xlsx", "bytes": 1234}]
++
++
++def test_still_working_note_is_its_own_kind(home):
++    a = make()
++    msg = MIMEMultipart()
++    msg["To"], msg["Subject"] = "carol@corp.com", "Re: Upper case"
++    msg.attach(MIMEText(mod._ACK_TEXT, "plain", "utf-8"))
++    a._record_sent(msg)
++    assert rows(home)[0]["kind"] == "ack"
++
++
++def test_inbound_mail_and_outages_are_recorded(home, monkeypatch):
++    a = make()
++    a._sender_accepted = lambda *args: True
++    a.handle_message = AsyncMock()
++    monkeypatch.setattr(mod, "_esecret_int", lambda name, default: 0 if name == "EMAIL_ACK_AFTER_MINUTES" else default)
++    asyncio.run(a._dispatch_message({"sender_addr": "carol@corp.com", "sender_name": "Carol", "subject": "Upper case",
++                                     "body": "hi", "attachments": [], "message_id": "<1@x>", "in_reply_to": ""}))
++    monkeypatch.setattr(EmailAdapter, "_inbox_down_since", {"bot@gmail.com": mod.time.time() - 600})
++    monkeypatch.setattr(EmailAdapter, "_inbox_alerted", set())
++    a._inbox_ok()
++    kinds = [(r["kind"], r.get("sender"), r.get("minutes")) for r in rows(home)]
++    assert kinds[0] == ("in", "carol@corp.com", None) and kinds[1][0] == "outage" and kinds[1][2] >= 9.9

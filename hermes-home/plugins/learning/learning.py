@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import mailguard, webguard
+from . import mailguard, tlsguard, webguard
 
 logger = logging.getLogger(__name__)
 
@@ -420,14 +420,21 @@ def on_post_tool_call(tool_name: str = "", result: Any = None, session_id: str =
 def on_pre_tool_call(tool_name: str = "", args: Optional[dict] = None, session_id: str = "",
                      task_id: str = "", **_: Any) -> Optional[dict]:
     """Block web_search / web_extract calls that would carry private data off the machine; log every one.
-    Also block send_email calls that would mail a file the wrong way (see mailguard)."""
+    Also block send_email calls that would mail a file the wrong way (see mailguard) and terminal
+    commands that turn certificate checks off (see tlsguard)."""
     args = args if isinstance(args, dict) else {}
+    reason = tlsguard.problem(tool_name, args)
+    if reason:
+        logger.info("tlsguard blocked a terminal command: %s", reason)
+        _append("guard.jsonl", {"ts": time.time(), "guard": "tls", "session": session_id, "reason": reason})
+        return {"action": "block", "message": tlsguard.block_message(reason)}
     if mailguard.is_send_email(tool_name):
         from gateway.session_context import get_session_env
         reason = mailguard.problem(args, get_session_env("HERMES_SESSION_PLATFORM", ""),
                                    get_session_env("HERMES_SESSION_CHAT_ID", ""))
         if reason:
             logger.info("mailguard blocked send_email: %s", reason)
+            _append("guard.jsonl", {"ts": time.time(), "guard": "mail", "session": session_id, "reason": reason})
         return {"action": "block", "message": mailguard.block_message(reason)} if reason else None
     if tool_name not in webguard.WEB_TOOLS:
         return None

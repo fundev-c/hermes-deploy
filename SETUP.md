@@ -77,6 +77,7 @@ git apply         "$R\hermes-agent-patches\0009-email-attachment-names.patch"
 git apply         "$R\hermes-agent-patches\0010-email-session-per-thread.patch"
 git apply         "$R\hermes-agent-patches\0011-media-host-path-no-docker-warning.patch"
 git apply         "$R\hermes-agent-patches\0012-email-inbox-alert-and-still-working-note.patch"
+git apply         "$R\hermes-agent-patches\0013-email-activity-log.patch"
 ```
 
 Patch 0003 makes a multiplexed gateway cache a named profile's email attachments under that
@@ -112,6 +113,15 @@ learning plugin's reply transform), then moved to `/workspace/sent/` so a later 
 `sandbox_to_drive` now overwrites a same-name file by default (atomically; `bdrive restore` brings back
 the old version) instead of piling up `name (2).ext` copies; `on_exists: rename` or `fail` keep the old
 behaviour. `drive_save_attachment` (inbound attachments) still never overwrites.
+Patch 0013 writes `logs/email.jsonl` in the owning profile (mail in, replies out with attachment names
+and sizes, still-working notes, inbox outages) and logs one `[Email] Sent ...` line per email. The daily
+learning digest now opens with an Email section built from it, plus how many replies the answer checker
+sent back, how many went out checked by rules only, and what the guards blocked (`learning/guard.jsonl`).
+The digest goes to `EMAIL_HOME_ADDRESS` (team `.env`), or to the agent's own mailbox when that is unset.
+The answer checker's judge has a 20 s deadline: `plugins.hook_callback_timeout` (30 s) abandons the whole
+`pre_verify` callback, rules included, when it runs over. Its rules also fail a reply that pastes more
+than 8,000 characters into the body while attaching a file. `tlsguard.py` blocks terminal commands that
+turn certificate checks off (`curl -k`, `verify=False`, ...).
 The learning plugin also guards file delivery, since the model ignored the SOUL rules for it
 (email tasks, 27 and 28 Oct): `mailguard.py` blocks `send_email` to the sender being answered and any
 `MEDIA:` line typed into a `send_email` body, and the verifier fails a reply when a file was

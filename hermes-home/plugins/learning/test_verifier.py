@@ -17,6 +17,7 @@ from learning import learning as L  # noqa: E402
 from learning import verifier as V  # noqa: E402
 
 REQ = "Check this file and make a separate sheet with the needed changes. Keep the columns the same."
+REAL_JUDGE = V.judge  # the autouse fixture below fakes it; the deadline test needs the real wrapper
 
 
 def turn(request, *events, reply=None):
@@ -214,3 +215,27 @@ def test_transform_appends_collected_outputs(monkeypatch):
 def test_beardrive_is_found_by_location_not_name():
     from beardrive import tools as T  # noqa: F401  (same plugins folder as learning)
     assert L._beardrive_tools().__file__.endswith("beardrive/tools.py")
+
+
+def test_judge_deadline_leaves_room_inside_the_hook_budget():
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+    assert V.JUDGE_DEADLINE + 5 <= DEFAULT_CONFIG["plugins"]["hook_callback_timeout"]
+
+
+def test_slow_judge_still_returns_the_rules_in_time(monkeypatch):
+    import time as _time
+    monkeypatch.setattr(V, "judge", REAL_JUDGE)
+    monkeypatch.setattr(V, "JUDGE_DEADLINE", 0.2)
+    monkeypatch.setattr(V, "_judge", lambda *a: _time.sleep(2))
+    t = _time.monotonic()
+    v = V.verify(turn(REQ, TERM_FAIL), "Done! I attached the corrected sheet.")
+    assert _time.monotonic() - t < 1.5
+    assert v["verdict"] == "fail" and v["rules"] and v["judge_skipped"] is True
+
+
+def test_table_pasted_into_the_body_next_to_an_attachment_fails():
+    rows = "\n".join(f"Company {i}\tJapan\t50\tRicoh" for i in range(500))
+    v = V.verify(turn(REQ, TERM_OK, SAVED), f"{rows}\nMEDIA:/c/out_x.xlsx")
+    assert v["verdict"] == "fail" and any("characters" in p for p in v["rules"])
+    short = V.verify(turn(REQ, TERM_OK, SAVED), "Done: 500 rows, file attached.\nMEDIA:/c/out_x.xlsx")
+    assert short["verdict"] == "pass"
